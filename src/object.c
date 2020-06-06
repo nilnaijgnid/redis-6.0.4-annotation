@@ -232,6 +232,7 @@ robj *createSetObject(void) {
     return o;
 }
 
+// 创建整型集合编码的集合对象
 robj *createIntsetObject(void) {
     intset *is = intsetNew();
     robj *o = createObject(OBJ_SET,is);
@@ -409,6 +410,7 @@ int checkType(client *c, robj *o, int type) {
     return 0;
 }
 
+// 判断是否可以将一个sds类型的值转换为long long类型的值
 int isSdsRepresentableAsLongLong(sds s, long long *llval) {
     return string2ll(s,sdslen(s),llval) ? C_OK : C_ERR;
 }

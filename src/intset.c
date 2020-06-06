@@ -93,7 +93,7 @@ static void _intsetSet(intset *is, int pos, int64_t value) {
     }
 }
 
-/* Create an empty intset. */
+/* 创建一个空的整型集合 */
 intset *intsetNew(void) {
     intset *is = zmalloc(sizeof(intset));
     is->encoding = intrev32ifbe(INTSET_ENC_INT16);
@@ -108,10 +108,8 @@ static intset *intsetResize(intset *is, uint32_t len) {
     return is;
 }
 
-/* Search for the position of "value". Return 1 when the value was found and
- * sets "pos" to the position of the value within the intset. Return 0 when
- * the value is not present in the intset and sets "pos" to the position
- * where "value" can be inserted. */
+/* 搜索value的位置，如果找到的话返回1，并将该值的位置保存在pos中；
+ * 如果没有找打的话，返回0，并将pos的值设置为value可以存放的位置 */
 static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
     int min = 0, max = intrev32ifbe(is->length)-1, mid = -1;
     int64_t cur = -1;
@@ -230,7 +228,7 @@ intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
     return is;
 }
 
-/* Delete integer from intset */
+/* 从整型集合中删除一个整数 */
 intset *intsetRemove(intset *is, int64_t value, int *success) {
     uint8_t valenc = _intsetValueEncoding(value);
     uint32_t pos;

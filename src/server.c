@@ -1415,6 +1415,7 @@ dictType replScriptCacheDictType = {
     NULL                        /* val destructor */
 };
 
+// 判断哈希表是否需要调整大小（set删除元素时有用到）
 int htNeedsResize(dict *dict) {
     long long size, used;
 

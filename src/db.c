@@ -146,11 +146,8 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
     return lookupKeyReadWithFlags(db,key,LOOKUP_NONE);
 }
 
-/* Lookup a key for write operations, and as a side effect, if needed, expires
- * the key if its TTL is reached.
- *
- * Returns the linked value object if the key exists or NULL if the key
- * does not exist in the specified DB. */
+/* 查找一个key从来做写操作，如果key的ttl到了，将其设置为过期
+ * 如果找到了，则返回key对应的值得指针，否则返回null */
 robj *lookupKeyWriteWithFlags(redisDb *db, robj *key, int flags) {
     expireIfNeeded(db,key);
     return lookupKey(db,key,flags);
@@ -463,6 +460,8 @@ long long dbTotalServerKeyCount() {
 /*-----------------------------------------------------------------------------
  * Hooks for key space changes.
  *
+ * 钩子函数
+ * 每当数据库中的一个key被修改，调用signalModifiedKey()函数
  * Every time a key in the database is modified the function
  * signalModifiedKey() is called.
  *
