@@ -408,29 +408,20 @@ void spopWithCountCommand(client *c) {
         return;
     }
 
-    /* Case 2 and 3 require to replicate SPOP as a set of SREM commands.
-     * Prepare our replication argument vector. Also send the array length
-     * which is common to both the code paths. 
-     * 第2种情况和第3种情况要求将SPOP复制为一组SREM命令。准备复制参数向量。同时发送两个代码路径共用的数组长度。*/
+    /* 第2种情况和第3种情况需要将将SPOP装换为一组SREM命令 */
     robj *propargv[3];
     propargv[0] = createStringObject("SREM",4);
     propargv[1] = c->argv[1];
     addReplySetLen(c,count);
 
-    /* Common iteration vars. */
     sds sdsele;
     robj *objele;
     int encoding;
     int64_t llele;
-    unsigned long remaining = size-count; /* Elements left after SPOP. */
+    unsigned long remaining = size-count; /* 执行SPOP命令之后剩下的元素数量 */
 
-    /* If we are here, the number of requested elements is less than the
-     * number of elements inside the set. Also we are sure that count < size.
-     * Use two different strategies.
-     *
-     * CASE 2: The number of elements to return is small compared to the
-     * set size. We can just extract random elements and return them to
-     * the set. */
+    /* 第2中情况：
+     * 需要返回的元素的数量相对于集合的数量比较小，只需要提取一些随机的元素 */
     if (remaining*SPOP_MOVE_STRATEGY_MUL > count) {
         while(count--) {
             /* Emit and remove. */
@@ -445,24 +436,19 @@ void spopWithCountCommand(client *c) {
                 setTypeRemove(set,sdsele);
             }
 
-            /* Replicate/AOF this command as an SREM operation */
+            // 将SREM命令传播到AOF和REPL
             propargv[2] = objele;
             alsoPropagate(server.sremCommand,c->db->id,propargv,3,
                 PROPAGATE_AOF|PROPAGATE_REPL);
             decrRefCount(objele);
         }
     } else {
-    /* CASE 3: The number of elements to return is very big, approaching
-     * the size of the set itself. After some time extracting random elements
-     * from such a set becomes computationally expensive, so we use
-     * a different strategy, we extract random elements that we don't
-     * want to return (the elements that will remain part of the set),
-     * creating a new set as we do this (that will be stored as the original
-     * set). Then we return the elements left in the original set and
-     * release it. */
+    /* 第3中情况：
+     * 要返回的数量相对于集合而言非常大，接近于集合本身，成本也会比较高，我们使用一种不同策略，
+     * 只需要找到我们不希望返回的数量，然后返回剩下的元素 */
         robj *newset = NULL;
 
-        /* Create a new set with just the remaining elements. */
+        /* 创建新的集合存储剩下的元素 */
         while(remaining--) {
             encoding = setTypeRandomElement(set,&sdsele,&llele);
             if (encoding == OBJ_ENCODING_INTSET) {
@@ -476,7 +462,7 @@ void spopWithCountCommand(client *c) {
             sdsfree(sdsele);
         }
 
-        /* Transfer the old set to the client. */
+        /* 把老的集合传递给客户端 */
         setTypeIterator *si;
         si = setTypeInitIterator(set);
         while((encoding = setTypeNext(si,&sdsele,&llele)) != -1) {
@@ -488,7 +474,7 @@ void spopWithCountCommand(client *c) {
                 objele = createStringObject(sdsele,sdslen(sdsele));
             }
 
-            /* Replicate/AOF this command as an SREM operation */
+            // 将SREM命令传播到AOF和REPL
             propargv[2] = objele;
             alsoPropagate(server.sremCommand,c->db->id,propargv,3,
                 PROPAGATE_AOF|PROPAGATE_REPL);
@@ -496,43 +482,43 @@ void spopWithCountCommand(client *c) {
         }
         setTypeReleaseIterator(si);
 
-        /* Assign the new set as the key value. */
+        // 将新创建的集合对象代替原来的集合，为当前key关联一个新value
         dbOverwrite(c->db,c->argv[1],newset);
     }
 
-    /* Don't propagate the command itself even if we incremented the
-     * dirty counter. We don't want to propagate an SPOP command since
-     * we propagated the command as a set of SREMs operations using
-     * the alsoPropagate() API. */
+    /* 即使我们增加了脏计数器，也不要传播命令本身。我们不想传播SPOP命令，
+     * 因为我们使用alsoPropagate()API将该命令作为一组srem操作进行传播。 */
     decrRefCount(propargv[0]);
     preventCommandPropagation(c);
     signalModifiedKey(c,c->db,c->argv[1]);
     server.dirty++;
 }
 
+// spop命令
 void spopCommand(client *c) {
     robj *set, *ele, *aux;
     sds sdsele;
     int64_t llele;
     int encoding;
 
+    // 带数量的spop，使用spopWithCountCommand()函数
     if (c->argc == 3) {
         spopWithCountCommand(c);
         return;
     } else if (c->argc > 3) {
+        // 参数不可能大于3，返回语法错误
         addReply(c,shared.syntaxerr);
         return;
     }
 
-    /* Make sure a key with the name inputted exists, and that it's type is
-     * indeed a set */
+    /* 保证对应的key存在，且为集合类型 */
     if ((set = lookupKeyWriteOrReply(c,c->argv[1],shared.null[c->resp]))
          == NULL || checkType(c,set,OBJ_SET)) return;
 
-    /* Get a random element from the set */
+    /* 获取集合中的一个随机的元素 */
     encoding = setTypeRandomElement(set,&sdsele,&llele);
 
-    /* Remove the element from the set */
+    /* 从集合中移除元素 */
     if (encoding == OBJ_ENCODING_INTSET) {
         ele = createStringObjectFromLongLong(llele);
         set->ptr = intsetRemove(set->ptr,llele,NULL);
@@ -543,32 +529,27 @@ void spopCommand(client *c) {
 
     notifyKeyspaceEvent(NOTIFY_SET,"spop",c->argv[1],c->db->id);
 
-    /* Replicate/AOF this command as an SREM operation */
+    /* 传播命令 */
     aux = createStringObject("SREM",4);
     rewriteClientCommandVector(c,3,aux,c->argv[1],ele);
     decrRefCount(aux);
 
-    /* Add the element to the reply */
+    /* 将元素添加到返回中 */
     addReplyBulk(c,ele);
     decrRefCount(ele);
 
-    /* Delete the set if it's empty */
+    /* 如果对应的集合为空，将其删除 */
     if (setTypeSize(set) == 0) {
         dbDelete(c->db,c->argv[1]);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",c->argv[1],c->db->id);
     }
 
-    /* Set has been modified */
     signalModifiedKey(c,c->db,c->argv[1]);
     server.dirty++;
 }
 
-/* handle the "SRANDMEMBER key <count>" variant. The normal version of the
- * command is handled by the srandmemberCommand() function itself. */
+/* 处理"SRANDMEMBER key <count>" 命令的函数的变种. 正常版本是由srandmemberCommand()函数处理的 */
 
-/* How many times bigger should be the set compared to the requested size
- * for us to don't use the "remove elements" strategy? Read later in the
- * implementation for more info. */
 #define SRANDMEMBER_SUB_STRATEGY_MUL 3
 
 void srandmemberWithCountCommand(client *c) {
@@ -586,8 +567,7 @@ void srandmemberWithCountCommand(client *c) {
     if (l >= 0) {
         count = (unsigned long) l;
     } else {
-        /* A negative count means: return the same elements multiple times
-         * (i.e. don't remove the extracted element after every extraction). */
+        /* 如果count为负数，可能一个元素会返回多次 */
         count = -l;
         uniq = 0;
     }
@@ -596,16 +576,14 @@ void srandmemberWithCountCommand(client *c) {
         == NULL || checkType(c,set,OBJ_SET)) return;
     size = setTypeSize(set);
 
-    /* If count is zero, serve it ASAP to avoid special cases later. */
     if (count == 0) {
         addReply(c,shared.emptyset[c->resp]);
         return;
     }
 
-    /* CASE 1: The count was negative, so the extraction method is just:
-     * "return N random elements" sampling the whole set every time.
-     * This case is trivial and can be served without auxiliary data
-     * structures. */
+    /* 第一种情况：
+     * count为负数，所以返回N个随机的元素，每次随机的样本都是整个集合，
+     * 这种情况很简单，不需要辅助数据结构就可以服务 */
     if (!uniq) {
         addReplySetLen(c,count);
         while(count--) {
@@ -619,30 +597,25 @@ void srandmemberWithCountCommand(client *c) {
         return;
     }
 
-    /* CASE 2:
-     * The number of requested elements is greater than the number of
-     * elements inside the set: simply return the whole set. */
+    /* 第2种情况:
+     * count大于集合的长度，返回整个集合. */
     if (count >= size) {
         sunionDiffGenericCommand(c,c->argv+1,1,NULL,SET_OP_UNION);
         return;
     }
 
-    /* For CASE 3 and CASE 4 we need an auxiliary dictionary. */
+    /* 第3种和第4中情况，需要使用一个辅助字典 */
     d = dictCreate(&objectKeyPointerValueDictType,NULL);
 
-    /* CASE 3:
-     * The number of elements inside the set is not greater than
-     * SRANDMEMBER_SUB_STRATEGY_MUL times the number of requested elements.
-     * In this case we create a set from scratch with all the elements, and
-     * subtract random elements to reach the requested number of elements.
-     *
-     * This is done because if the number of requsted elements is just
-     * a bit less than the number of elements in the set, the natural approach
-     * used into CASE 3 is highly inefficient. */
+    /* 第3种情况:
+     * 集合的元素数量小于count*SRANDMEMBER_SUB_STRATEGY_MUL，这种情况下，
+     * 我们创建一个全新的包含所有元素的集合，然后随机截取元素达到请求的元素数量。
+     * 之所以这样做，是因为如果重新排序的元素的数量只比集合中的元素数量少一点，
+     * 对于一般请求的元素比较少的情况下，使用这种方式效率比较低 */
     if (count*SRANDMEMBER_SUB_STRATEGY_MUL > size) {
         setTypeIterator *si;
 
-        /* Add all the elements into the temporary dictionary. */
+        /* 把所有的元素添加到新的字典中. */
         si = setTypeInitIterator(set);
         while((encoding = setTypeNext(si,&ele,&llele)) != -1) {
             int retval = DICT_ERR;
@@ -657,7 +630,7 @@ void srandmemberWithCountCommand(client *c) {
         setTypeReleaseIterator(si);
         serverAssert(dictSize(d) == size);
 
-        /* Remove random elements to reach the right count. */
+        /* 循环移除随机元素，使得数量满足需求 */
         while(size > count) {
             dictEntry *de;
 
@@ -667,10 +640,8 @@ void srandmemberWithCountCommand(client *c) {
         }
     }
 
-    /* CASE 4: We have a big set compared to the requested number of elements.
-     * In this case we can simply get random elements from the set and add
-     * to the temporary set, trying to eventually get enough unique elements
-     * to reach the specified count. */
+    /* 第4种情况：
+     * 请求的元素相对于集合长度较小，创建一个新的集合，然后随机的元素添加到集合中 */
     else {
         unsigned long added = 0;
         robj *objele;
@@ -682,9 +653,7 @@ void srandmemberWithCountCommand(client *c) {
             } else {
                 objele = createStringObject(ele,sdslen(ele));
             }
-            /* Try to add the object to the dictionary. If it already exists
-             * free it, otherwise increment the number of objects we have
-             * in the result dictionary. */
+
             if (dictAdd(d,objele,NULL) == DICT_OK)
                 added++;
             else
@@ -692,7 +661,7 @@ void srandmemberWithCountCommand(client *c) {
         }
     }
 
-    /* CASE 3 & 4: send the result to the user. */
+    /* 第3和第4中情况: 发送结果给客户端 */
     {
         dictIterator *di;
         dictEntry *de;
@@ -706,6 +675,7 @@ void srandmemberWithCountCommand(client *c) {
     }
 }
 
+// 获取集合中随机元素
 void srandmemberCommand(client *c) {
     robj *set;
     sds ele;
@@ -713,6 +683,7 @@ void srandmemberCommand(client *c) {
     int encoding;
 
     if (c->argc == 3) {
+        // 参数数量大于3，使用srandmemberWithCountCommand()函数处理
         srandmemberWithCountCommand(c);
         return;
     } else if (c->argc > 3) {
@@ -731,14 +702,14 @@ void srandmemberCommand(client *c) {
     }
 }
 
+// 对比两个集合s1和s2的数量大小
 int qsortCompareSetsByCardinality(const void *s1, const void *s2) {
     if (setTypeSize(*(robj**)s1) > setTypeSize(*(robj**)s2)) return 1;
     if (setTypeSize(*(robj**)s1) < setTypeSize(*(robj**)s2)) return -1;
     return 0;
 }
 
-/* This is used by SDIFF and in this case we can receive NULL that should
- * be handled as empty sets. */
+/* 被SDIFF命令使用，对比两个集合元素数量大小*/
 int qsortCompareSetsByRevCardinality(const void *s1, const void *s2) {
     robj *o1 = *(robj**)s1, *o2 = *(robj**)s2;
     unsigned long first = o1 ? setTypeSize(o1) : 0;
@@ -749,6 +720,7 @@ int qsortCompareSetsByRevCardinality(const void *s1, const void *s2) {
     return 0;
 }
 
+// sinter命令，求交集
 void sinterGenericCommand(client *c, robj **setkeys,
                           unsigned long setnum, robj *dstkey) {
     robj **sets = zmalloc(sizeof(robj*)*setnum);
@@ -761,6 +733,8 @@ void sinterGenericCommand(client *c, robj **setkeys,
     int encoding;
 
     for (j = 0; j < setnum; j++) {
+        // 如果dstkey为空，则是SINTER命令，不为空则是SINTERSTORE命令
+        // 如果是SINTER命令，则以读操作读取出集合对象，否则以写操作读取出集合对象
         robj *setobj = dstkey ?
             lookupKeyWrite(c->db,setkeys[j]) :
             lookupKeyRead(c->db,setkeys[j]);
@@ -783,39 +757,27 @@ void sinterGenericCommand(client *c, robj **setkeys,
         }
         sets[j] = setobj;
     }
-    /* Sort sets from the smallest to largest, this will improve our
-     * algorithm's performance */
+    /* 从小到大排序集合数组中的集合大小，能够提高算法的性能 */
     qsort(sets,setnum,sizeof(robj*),qsortCompareSetsByCardinality);
 
-    /* The first thing we should output is the total number of elements...
-     * since this is a multi-bulk write, but at this stage we don't know
-     * the intersection set size, so we use a trick, append an empty object
-     * to the output list and save the pointer to later modify it with the
-     * right length */
+
     if (!dstkey) {
-        replylen = addReplyDeferredLen(c);
+        replylen = addReplyDeferredLen(c); // sinter命令
     } else {
-        /* If we have a target key where to store the resulting set
-         * create this key with an empty set inside */
-        dstset = createIntsetObject();
+        dstset = createIntsetObject(); // sinterstore命令，创建一个空的集合存储元素
     }
 
-    /* Iterate all the elements of the first (smallest) set, and test
-     * the element against all the other sets, if at least one set does
-     * not include the element it is discarded */
+    /* 迭代数量最少的那个集合，然后和其他的集合中的元素进行比较，只要该元素在其中一个集合中不存在，
+     * 则这个元素就会被忽略 */
     si = setTypeInitIterator(sets[0]);
     while((encoding = setTypeNext(si,&elesds,&intobj)) != -1) {
         for (j = 1; j < setnum; j++) {
             if (sets[j] == sets[0]) continue;
             if (encoding == OBJ_ENCODING_INTSET) {
-                /* intset with intset is simple... and fast */
                 if (sets[j]->encoding == OBJ_ENCODING_INTSET &&
                     !intsetFind((intset*)sets[j]->ptr,intobj))
                 {
                     break;
-                /* in order to compare an integer with an object we
-                 * have to use the generic function, creating an object
-                 * for this */
                 } else if (sets[j]->encoding == OBJ_ENCODING_HT) {
                     elesds = sdsfromlonglong(intobj);
                     if (!setTypeIsMember(sets[j],elesds)) {
@@ -831,15 +793,17 @@ void sinterGenericCommand(client *c, robj **setkeys,
             }
         }
 
-        /* Only take action when all sets contain the member */
+        /* 只有所有集合中都包含该元素，才是有效地元素 */
         if (j == setnum) {
             if (!dstkey) {
+                // 如果是sinter命令，把元素添加到返回结果中
                 if (encoding == OBJ_ENCODING_HT)
                     addReplyBulkCBuffer(c,elesds,sdslen(elesds));
                 else
                     addReplyBulkLongLong(c,intobj);
                 cardinality++;
             } else {
+                // 如果是sinterstore命令，把元素添加到目标集合中
                 if (encoding == OBJ_ENCODING_INTSET) {
                     elesds = sdsfromlonglong(intobj);
                     setTypeAdd(dstset,elesds);
@@ -853,8 +817,7 @@ void sinterGenericCommand(client *c, robj **setkeys,
     setTypeReleaseIterator(si);
 
     if (dstkey) {
-        /* Store the resulting set into the target, if the intersection
-         * is not an empty set. */
+        // 如果目标集合不为空，则要先删除该集合
         int deleted = dbDelete(c->db,dstkey);
         if (setTypeSize(dstset) > 0) {
             dbAdd(c->db,dstkey,dstset);
@@ -876,18 +839,21 @@ void sinterGenericCommand(client *c, robj **setkeys,
     zfree(sets);
 }
 
+// sinter命令，求交集
 void sinterCommand(client *c) {
     sinterGenericCommand(c,c->argv+1,c->argc-1,NULL);
 }
 
+// sinterstore命令，求交集并存储到指定的集合中
 void sinterstoreCommand(client *c) {
     sinterGenericCommand(c,c->argv+2,c->argc-2,c->argv[1]);
 }
 
-#define SET_OP_UNION 0
-#define SET_OP_DIFF 1
-#define SET_OP_INTER 2
+#define SET_OP_UNION 0      // 并集
+#define SET_OP_DIFF 1       // 差集
+#define SET_OP_INTER 2      // 交集
 
+// 并集和差集的实现
 void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
                               robj *dstkey, int op) {
     robj **sets = zmalloc(sizeof(robj*)*setnum);
@@ -912,15 +878,9 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
         sets[j] = setobj;
     }
 
-    /* Select what DIFF algorithm to use.
-     *
-     * Algorithm 1 is O(N*M) where N is the size of the element first set
-     * and M the total number of sets.
-     *
-     * Algorithm 2 is O(N) where N is the total number of elements in all
-     * the sets.
-     *
-     * We compute what is the best bet with the current input here. */
+    /* 选择差集算法：
+     * 1.时间复杂度O(N*M)，N是第一个集合中元素的总个数，M是集合的总个数
+     * 2.时间复杂度O(N)，N是所有集合中元素的总个数 */
     if (op == SET_OP_DIFF && sets[0]) {
         long long algo_one_work = 0, algo_two_work = 0;
 
@@ -931,8 +891,7 @@ void sunionDiffGenericCommand(client *c, robj **setkeys, int setnum,
             algo_two_work += setTypeSize(sets[j]);
         }
 
-        /* Algorithm 1 has better constant times and performs less operations
-         * if there are elements in common. Give it some advantage. */
+        /* 算法1具有更好的常数时间，并且如果有共同的元素，则执行更少的操作. */
         algo_one_work /= 2;
         diff_algo = (algo_one_work <= algo_two_work) ? 1 : 2;
 
