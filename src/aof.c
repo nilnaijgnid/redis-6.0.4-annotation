@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "bio.h"
 #include "rio.h"
@@ -44,17 +15,11 @@ void aofUpdateCurrentSize(void);
 void aofClosePipes(void);
 
 /* ----------------------------------------------------------------------------
- * AOF rewrite buffer implementation.
+ * AOF重写缓冲区的实现
  *
- * The following code implement a simple buffer used in order to accumulate
- * changes while the background process is rewriting the AOF file.
- *
- * We only need to append, but can't just use realloc with a large block
- * because 'huge' reallocs are not always handled as one could expect
- * (via remapping of pages at OS level) but may involve copying data.
- *
- * For this reason we use a list of blocks, every block is
- * AOF_RW_BUF_BLOCK_SIZE bytes.
+ * 以下的代码实现了一个当后台进程在重写aof文件的时候用来存储增量更新的缓冲区。
+ * 虽然我们只需要追加内容到缓冲区中，但是不能只是分配一个非常大的内存块，因为这里涉及到内存数据拷贝的问题。
+ * 这里我们使用一个内存块列表，每个块的大小为AOF_RW_BUF_BLOCK_SIZE字节（10M）
  * ------------------------------------------------------------------------- */
 
 #define AOF_RW_BUF_BLOCK_SIZE (1024*1024*10)    /* 10 MB per block */
@@ -64,9 +29,7 @@ typedef struct aofrwblock {
     char buf[AOF_RW_BUF_BLOCK_SIZE];
 } aofrwblock;
 
-/* This function free the old AOF rewrite buffer if needed, and initialize
- * a fresh new one. It tests for server.aof_rewrite_buf_blocks equal to NULL
- * so can be used for the first initialization as well. */
+/* 这个函数在需要的情况下释放老的重写缓冲区，并初始化一个新的缓冲区 */
 void aofRewriteBufferReset(void) {
     if (server.aof_rewrite_buf_blocks)
         listRelease(server.aof_rewrite_buf_blocks);
@@ -75,7 +38,7 @@ void aofRewriteBufferReset(void) {
     listSetFreeMethod(server.aof_rewrite_buf_blocks,zfree);
 }
 
-/* Return the current size of the AOF rewrite buffer. */
+/* 返回当前AOF重写缓冲区的大小 */
 unsigned long aofRewriteBufferSize(void) {
     listNode *ln;
     listIter li;
@@ -89,9 +52,7 @@ unsigned long aofRewriteBufferSize(void) {
     return size;
 }
 
-/* Event handler used to send data to the child process doing the AOF
- * rewrite. We send pieces of our AOF differences buffer so that the final
- * write when the child finishes the rewrite will be small. */
+/* 将差异数据分片发送到子进程，这样重写的最后阶段，需要发送的数据量就会很小 */
 void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     listNode *ln;
     aofrwblock *block;
@@ -117,21 +78,23 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
             block->used -= nwritten;
             block->free += nwritten;
         }
+        // buffer数据已经写完，删除缓存列表
         if (block->used == 0) listDelNode(server.aof_rewrite_buf_blocks,ln);
     }
 }
 
-/* Append data to the AOF rewrite buffer, allocating new blocks if needed. */
+/* 将数据追加到缓冲区中, 需要的情况下分配新的缓冲区块 */
 void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
+    // 指针指向最后一个缓冲块，因为数据要添加到最后
     listNode *ln = listLast(server.aof_rewrite_buf_blocks);
     aofrwblock *block = ln ? ln->value : NULL;
 
     while(len) {
-        /* If we already got at least an allocated block, try appending
-         * at least some piece into it. */
+        /* 如果有缓冲块的话，就将数据追加进去 */
         if (block) {
             unsigned long thislen = (block->free < len) ? block->free : len;
-            if (thislen) {  /* The current block is not already full. */
+            // 如果最后一个块空间足够的话，就把数据放进去，不够的话，能放多少放多少
+            if (thislen) {
                 memcpy(block->buf+block->used, s, thislen);
                 block->used += thislen;
                 block->free -= thislen;
@@ -139,17 +102,18 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
                 len -= thislen;
             }
         }
-
-        if (len) { /* First block to allocate, or need another block. */
+        // 数据没放完，需要创建新的块
+        if (len) { /* 创建第一个块或者是额外的块，取决于block是否为Null */
             int numblocks;
 
+            // 分配内存并初始化block
             block = zmalloc(sizeof(*block));
             block->free = AOF_RW_BUF_BLOCK_SIZE;
             block->used = 0;
+            // 并将其添加到列表的最后
             listAddNodeTail(server.aof_rewrite_buf_blocks,block);
 
-            /* Log every time we cross more 10 or 100 blocks, respectively
-             * as a notice or warning. */
+            /* 每创建10个块都记录到日志 */
             numblocks = listLength(server.aof_rewrite_buf_blocks);
             if (((numblocks+1) % 10) == 0) {
                 int level = ((numblocks+1) % 100) == 0 ? LL_WARNING :
@@ -160,17 +124,14 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
         }
     }
 
-    /* Install a file event to send data to the rewrite child if there is
-     * not one already. */
     if (aeGetFileEvents(server.el,server.aof_pipe_write_data_to_child) == 0) {
         aeCreateFileEvent(server.el, server.aof_pipe_write_data_to_child,
             AE_WRITABLE, aofChildWriteDiffData, NULL);
     }
 }
 
-/* Write the buffer (possibly composed of multiple blocks) into the specified
- * fd. If a short write or any other error happens -1 is returned,
- * otherwise the number of bytes written is returned. */
+/* 将缓冲区（可能包含多个缓冲块）写入到文件描述符fd中. 
+ * 如果发生短写或者其他错误，返回-1，否则返回写入的字节的数量 */
 ssize_t aofRewriteBufferWrite(int fd) {
     listNode *ln;
     listIter li;
@@ -194,49 +155,46 @@ ssize_t aofRewriteBufferWrite(int fd) {
 }
 
 /* ----------------------------------------------------------------------------
- * AOF file implementation
+ * AOF文件实现
  * ------------------------------------------------------------------------- */
 
-/* Return true if an AOf fsync is currently already in progress in a
- * BIO thread. */
+/* 如果已经有一个BIO线程在AOF文件同步的话返回true */
 int aofFsyncInProgress(void) {
     return bioPendingJobsOfType(BIO_AOF_FSYNC) != 0;
 }
 
-/* Starts a background task that performs fsync() against the specified
- * file descriptor (the one of the AOF file) in another thread. */
+/* 启动一个后台任务，使用另一个线程对特定的文件描述符（aof文件）执行fsync()函数 */
 void aof_background_fsync(int fd) {
     bioCreateBackgroundJob(BIO_AOF_FSYNC,(void*)(long)fd,NULL,NULL);
 }
 
-/* Kills an AOFRW child process if exists */
+/* 如果存在aofrewire子线程，将其kill掉 */
 void killAppendOnlyChild(void) {
     int statloc;
-    /* No AOFRW child? return. */
+    /* 不存在aofrewrite子线程 */
     if (server.aof_child_pid == -1) return;
-    /* Kill AOFRW child, wait for child exit. */
+    /* kill子线程，并等待子线程退出 */
     serverLog(LL_NOTICE,"Killing running AOF rewrite child: %ld",
         (long) server.aof_child_pid);
     if (kill(server.aof_child_pid,SIGUSR1) != -1) {
         while(wait3(&statloc,0,NULL) != server.aof_child_pid);
     }
-    /* Reset the buffer accumulating changes while the child saves. */
+    /* 重置aof重写缓冲区. */
     aofRewriteBufferReset();
+    // 清理aof重写的临时文件
     aofRemoveTempFile(server.aof_child_pid);
     server.aof_child_pid = -1;
     server.aof_rewrite_time_start = -1;
-    /* Close pipes used for IPC between the two processes. */
     aofClosePipes();
     closeChildInfoPipe();
     updateDictResizePolicy();
 }
 
-/* Called when the user switches from "appendonly yes" to "appendonly no"
- * at runtime using the CONFIG command. */
+/* 当用户在运行时使用config命令将"appendonly yes"修改为"appendonly no"时调用 */
 void stopAppendOnly(void) {
     serverAssert(server.aof_state != AOF_OFF);
-    flushAppendOnlyFile(1);
-    redis_fsync(server.aof_fd);
+    flushAppendOnlyFile(1); // 将aof缓冲区的内容刷到aof文件中
+    redis_fsync(server.aof_fd); // 清洗aof文件，同步到磁盘
     close(server.aof_fd);
 
     server.aof_fd = -1;
@@ -246,14 +204,14 @@ void stopAppendOnly(void) {
     killAppendOnlyChild();
 }
 
-/* Called when the user switches from "appendonly no" to "appendonly yes"
- * at runtime using the CONFIG command. */
+/* 当用户在运行时使用config命令将"appendonly no"修改为"appendonly yes"时调用 */
 int startAppendOnly(void) {
-    char cwd[MAXPATHLEN]; /* Current working dir path for error messages. */
+    char cwd[MAXPATHLEN]; /* 当前工作目录 */
     int newfd;
 
     newfd = open(server.aof_filename,O_WRONLY|O_APPEND|O_CREAT,0644);
     serverAssert(server.aof_state == AOF_OFF);
+    // 创建aof文件失败
     if (newfd == -1) {
         char *cwdp = getcwd(cwd,MAXPATHLEN);
 
@@ -265,13 +223,12 @@ int startAppendOnly(void) {
             strerror(errno));
         return C_ERR;
     }
+    // 当前正有子线程在执行rdbsave
     if (hasActiveChildProcess() && server.aof_child_pid == -1) {
         server.aof_rewrite_scheduled = 1;
         serverLog(LL_WARNING,"AOF was enabled but there is already another background operation. An AOF background was scheduled to start when possible.");
     } else {
-        /* If there is a pending AOF rewrite, we need to switch it off and
-         * start a new one: the old one cannot be reused because it is not
-         * accumulating the AOF buffer. */
+        /* 如果后台已经在做aof重写，则杀掉进程并重新开始 */
         if (server.aof_child_pid != -1) {
             serverLog(LL_WARNING,"AOF was enabled but there is already an AOF rewriting in background. Stopping background AOF and starting a rewrite now.");
             killAppendOnlyChild();
@@ -282,8 +239,7 @@ int startAppendOnly(void) {
             return C_ERR;
         }
     }
-    /* We correctly switched on AOF, now wait for the rewrite to be complete
-     * in order to append data on disk. */
+    /* 设置状态为等待AOF rewrite. */
     server.aof_state = AOF_WAIT_REWRITE;
     server.aof_last_fsync = server.unixtime;
     server.aof_fd = newfd;
@@ -316,24 +272,14 @@ ssize_t aofWrite(int fd, const char *buf, size_t len) {
     return totwritten;
 }
 
-/* Write the append only file buffer on disk.
- *
- * Since we are required to write the AOF before replying to the client,
- * and the only way the client socket can get a write is entering when the
- * the event loop, we accumulate all the AOF writes in a memory
- * buffer and write it on disk using this function just before entering
- * the event loop again.
- *
- * About the 'force' argument:
- *
- * When the fsync policy is set to 'everysec' we may delay the flush if there
- * is still an fsync() going on in the background thread, since for instance
- * on Linux write(2) will be blocked by the background fsync anyway.
- * When this happens we remember that there is some aof buffer to be
- * flushed ASAP, and will try to do that in the serverCron() function.
- *
- * However if force is set to 1 we'll write regardless of the background
- * fsync. */
+/*
+ * 将aof缓冲区内容写到磁盘中
+
+ * 关于'force'参数:
+ * 当异步同步策略设置为'everysec'，如果后台有fsync()函数在后台执行，我们会推迟fsync的执行。
+ * serverCron()函数会每秒执行一次。
+ * 
+ * 如果force参数设置为1，则无视后台fsync */
 #define AOF_WRITE_LOG_ERROR_RATE 30 /* Seconds between errors logging. */
 void flushAppendOnlyFile(int force) {
     ssize_t nwritten;
@@ -341,11 +287,9 @@ void flushAppendOnlyFile(int force) {
     mstime_t latency;
 
     if (sdslen(server.aof_buf) == 0) {
-        /* Check if we need to do fsync even the aof buffer is empty,
-         * because previously in AOF_FSYNC_EVERYSEC mode, fsync is
-         * called only when aof buffer is not empty, so if users
-         * stop write commands before fsync called in one second,
-         * the data in page cache cannot be flushed in time. */
+        /* 即使aof缓冲区是空的，也要检查是否需要fsync，因为以前在AOF_FSYNC_EVERYSEC模式下，
+         * 只有当aof缓冲区不是空的时候才调用fsync，所以如果用户在一秒钟内调用fsync之前停止写命令，
+         * 则无法及时刷新页缓存中的数据。*/
         if (server.aof_fsync == AOF_FSYNC_EVERYSEC &&
             server.aof_fsync_offset != server.aof_current_size &&
             server.unixtime > server.aof_last_fsync &&
@@ -360,9 +304,8 @@ void flushAppendOnlyFile(int force) {
         sync_in_progress = aofFsyncInProgress();
 
     if (server.aof_fsync == AOF_FSYNC_EVERYSEC && !force) {
-        /* With this append fsync policy we do background fsyncing.
-         * If the fsync is still in progress we can try to delay
-         * the write for a couple of seconds. */
+        /* 在AOF_FSYNC_EVERYSEC的同步策略下，如果不是强制刷新，
+         * 如果fsync操作已经在后台运行，那么等几秒钟再执行写入操作 */
         if (sync_in_progress) {
             if (server.aof_flush_postponed_start == 0) {
                 /* No previous write postponing, remember that we are
