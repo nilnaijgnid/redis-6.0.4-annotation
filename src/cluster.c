@@ -558,9 +558,7 @@ clusterLink *createClusterLink(clusterNode *node) {
     return link;
 }
 
-/* Free a cluster link, but does not free the associated node of course.
- * This function will just make sure that the original node associated
- * with this link will have the 'link' field set to NULL. */
+// 释放集群连接
 void freeClusterLink(clusterLink *link) {
     if (link->conn) {
         connClose(link->conn);
@@ -583,16 +581,12 @@ static void clusterConnAcceptHandler(connection *conn) {
         return;
     }
 
-    /* Create a link object we use to handle the connection.
-     * It gets passed to the readable handler when data is available.
-     * Initiallly the link->node pointer is set to NULL as we don't know
-     * which node is, but the right node is references once we know the
-     * node identity. */
+    /* 创建一个链接对象来处理连接*/
     link = createClusterLink(NULL);
     link->conn = conn;
     connSetPrivateData(conn, link);
 
-    /* Register read handler */
+    /* 注册读处理程序 */
     connSetReadHandler(conn, clusterReadHandler);
 }
 
@@ -605,8 +599,7 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(mask);
     UNUSED(privdata);
 
-    /* If the server is starting up, don't accept cluster connections:
-     * UPDATE messages may interact with the database content. */
+    /* 如果节点正在启动中，则不接受任何集群连接 */
     if (server.masterhost == NULL && server.loading) return;
 
     while(max--) {
@@ -640,15 +633,12 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
 }
 
 /* -----------------------------------------------------------------------------
- * Key space handling
+ * key空间处理
  * -------------------------------------------------------------------------- */
 
-/* We have 16384 hash slots. The hash slot of a given key is obtained
- * as the least significant 14 bits of the crc16 of the key.
- *
- * However if the key contains the {...} pattern, only the part between
- * { and } is hashed. This may be useful in the future to force certain
- * keys to be in the same node (assuming no resharding is in progress). */
+/* 我们有16384个哈希槽，获得给定key的哈希槽作为密钥的crc16的最低有效14比特
+ * 计算给定key应该被分配到哪个槽，如果key包含 {...} ，
+ * 那么只对{和}中的字符串计算哈希值（如果将来没有rehash的情况下） */
 unsigned int keyHashSlot(char *key, int keylen) {
     int s, e; /* start-end indexes of { and } */
 
@@ -674,13 +664,11 @@ unsigned int keyHashSlot(char *key, int keylen) {
  * 集群节点 API
  * -------------------------------------------------------------------------- */
 
-/* Create a new cluster node, with the specified flags.
- * If "nodename" is NULL this is considered a first handshake and a random
- * node name is assigned to this node (it will be fixed later when we'll
- * receive the first pong).
+/* 创建一个新的集群节点并指定flags
+ * 如果nodename为空的话，那么我们认为这是第一次握手，并指定一个随机的名称给这个节点。
+ * （当收到第一个PONG之后会修复）
  *
- * The node is created and returned to the user, but it is not automatically
- * added to the nodes hash table. */
+ * 节点被创建，但是不会自动添加到节点哈希表 */
 clusterNode *createClusterNode(char *nodename, int flags) {
     clusterNode *node = zmalloc(sizeof(*node));
 
@@ -712,24 +700,19 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     return node;
 }
 
-/* This function is called every time we get a failure report from a node.
- * The side effect is to populate the fail_reports list (or to update
- * the timestamp of an existing report).
+/* 每次当我们从一个节点获得失败报告时调用，
+ * 副作用是添加失败报告到失败列表中（或者更新已经存在的失败报告的时间戳）
  *
- * 'failing' is the node that is in failure state according to the
- * 'sender' node.
- *
- * The function returns 0 if it just updates a timestamp of an existing
- * failure report from the same sender. 1 is returned if a new failure
- * report is created. */
+ * failing是sender节点认为其处于失败状态的节点
+ * 
+ * 更新时间戳返回0，创建失败报告返回1 */
 int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
     list *l = failing->fail_reports;
     listNode *ln;
     listIter li;
     clusterNodeFailReport *fr;
 
-    /* If a failure report from the same sender already exists, just update
-     * the timestamp. */
+    /* 如果失败报告来自同一个sender，仅更新时间戳 */
     listRewind(l,&li);
     while ((ln = listNext(&li)) != NULL) {
         fr = ln->value;
@@ -739,26 +722,26 @@ int clusterNodeAddFailureReport(clusterNode *failing, clusterNode *sender) {
         }
     }
 
-    /* Otherwise create a new report. */
+    /* 否则创建一个新的报告 */
     fr = zmalloc(sizeof(*fr));
     fr->node = sender;
     fr->time = mstime();
+    // 将失败报告添加到失败报告列表的尾部
     listAddNodeTail(l,fr);
     return 1;
 }
 
-/* Remove failure reports that are too old, where too old means reasonably
- * older than the global node timeout. Note that anyway for a node to be
- * flagged as FAIL we need to have a local PFAIL state that is at least
- * older than the global node timeout, so we don't just trust the number
- * of failure reports from other nodes. */
+/* 删除时间超过了global node timeout的失败报告。
+ * 请注意，对于一个被标记为失败的节点，我们需要一个
+ * 至少比全局节点超时时间早的本地PFAIL状态，
+ * 因此我们不只是信任来自其他节点的失败报告的数量。*/
 void clusterNodeCleanupFailureReports(clusterNode *node) {
     list *l = node->fail_reports;
     listNode *ln;
     listIter li;
     clusterNodeFailReport *fr;
     mstime_t maxtime = server.cluster_node_timeout *
-                     CLUSTER_FAIL_REPORT_VALIDITY_MULT;
+                     CLUSTER_FAIL_REPORT_VALIDITY_MULT; // 2
     mstime_t now = mstime();
 
     listRewind(l,&li);
@@ -768,17 +751,11 @@ void clusterNodeCleanupFailureReports(clusterNode *node) {
     }
 }
 
-/* Remove the failing report for 'node' if it was previously considered
- * failing by 'sender'. This function is called when a node informs us via
- * gossip that a node is OK from its point of view (no FAIL or PFAIL flags).
- *
- * Note that this function is called relatively often as it gets called even
- * when there are no nodes failing, and is O(N), however when the cluster is
- * fine the failure reports list is empty so the function runs in constant
- * time.
- *
- * The function returns 1 if the failure report was found and removed.
- * Otherwise 0 is returned. */
+/* 如果sender节点之前认为node为失败状态，则删除失败报告。当一个节点通过gossip协议通知我们
+ * 从它的角度认为node处于OK状态（没有FAIL或者PFAIL状态）
+ * 注意，此函数的调用频率相对较高，因为即使在没有节点发生故障的情况下也会被调用，并且该函数的值为O（N），
+ * 但是当集群正常时，failure reports列表为空，因此该函数以固定的时间运行。
+ * 如果找到失败报告并删除，则返回1，否则返回0 */
 int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
     list *l = node->fail_reports;
     listNode *ln;
@@ -799,14 +776,13 @@ int clusterNodeDelFailureReport(clusterNode *node, clusterNode *sender) {
     return 1;
 }
 
-/* Return the number of external nodes that believe 'node' is failing,
- * not including this node, that may have a PFAIL or FAIL state for this
- * node as well. */
+/* 返回除了自己外部还要多少节点认为‘node’处于失败状态（包括PFAIL和FAIL ）*/
 int clusterNodeFailureReportsCount(clusterNode *node) {
     clusterNodeCleanupFailureReports(node);
     return listLength(node->fail_reports);
 }
 
+// 集群移出’master‘的slave节点
 int clusterNodeRemoveSlave(clusterNode *master, clusterNode *slave) {
     int j;
 
@@ -826,7 +802,7 @@ int clusterNodeRemoveSlave(clusterNode *master, clusterNode *slave) {
     return C_ERR;
 }
 
-// 集群节点添加从节点
+// 集群’master‘节点添加slave节点
 int clusterNodeAddSlave(clusterNode *master, clusterNode *slave) {
     int j;
 
@@ -844,6 +820,7 @@ int clusterNodeAddSlave(clusterNode *master, clusterNode *slave) {
     return C_OK;
 }
 
+// 返回节点n的处于健康状态的slave节点的数量
 int clusterCountNonFailingSlaves(clusterNode *n) {
     int j, okslaves = 0;
 
@@ -852,25 +829,24 @@ int clusterCountNonFailingSlaves(clusterNode *n) {
     return okslaves;
 }
 
-/* Low level cleanup of the node structure. Only called by clusterDelNode(). */
+/* 底层的node结构清理函数，仅被clusterDelNode()函数调用 */
 void freeClusterNode(clusterNode *n) {
     sds nodename;
     int j;
 
-    /* If the node has associated slaves, we have to set
-     * all the slaves->slaveof fields to NULL (unknown). */
+    /* 如果该节点有slave节点，我们要将所有的slave的slaveof字段设置为Null */
     for (j = 0; j < n->numslaves; j++)
         n->slaves[j]->slaveof = NULL;
 
-    /* Remove this node from the list of slaves of its master. */
+    /* 如果该节点是slave节点，则将其从他们主节点的slave列表中移出 */
     if (nodeIsSlave(n) && n->slaveof) clusterNodeRemoveSlave(n->slaveof,n);
 
-    /* Unlink from the set of nodes. */
+    /* 从集群字典中删除该节点 */
     nodename = sdsnewlen(n->name, CLUSTER_NAMELEN);
     serverAssert(dictDelete(server.cluster->nodes,nodename) == DICT_OK);
     sdsfree(nodename);
 
-    /* Release link and associated data structures. */
+    /* 释放链接和相关的数据结构 */
     if (n->link) freeClusterLink(n->link);
     listRelease(n->fail_reports);
     zfree(n->slaves);
@@ -886,23 +862,18 @@ int clusterAddNode(clusterNode *node) {
     return (retval == DICT_OK) ? C_OK : C_ERR;
 }
 
-/* Remove a node from the cluster. The function performs the high level
- * cleanup, calling freeClusterNode() for the low level cleanup.
- * Here we do the following:
+/* 将一个节点从集群中移出
  *
- * 1) Mark all the slots handled by it as unassigned.
- * 2) Remove all the failure reports sent by this node and referenced by
- *    other nodes.
- * 3) Free the node with freeClusterNode() that will in turn remove it
- *    from the hash table and from the list of slaves of its master, if
- *    it is a slave node.
+ * 1) 将该节点负责处理的slot标记为未指派
+ * 2) 删除该节点发送的所有的失败报告
+ * 3) 调用freeClusterNode()函数清理
  */
 void clusterDelNode(clusterNode *delnode) {
     int j;
     dictIterator *di;
     dictEntry *de;
 
-    /* 1) Mark slots as unassigned. */
+    /* 1) 将该节点负责处理的slot标记为未指派 */
     for (j = 0; j < CLUSTER_SLOTS; j++) {
         if (server.cluster->importing_slots_from[j] == delnode)
             server.cluster->importing_slots_from[j] = NULL;
@@ -912,7 +883,7 @@ void clusterDelNode(clusterNode *delnode) {
             clusterDelSlot(j);
     }
 
-    /* 2) Remove failure reports. */
+    /* 2) 删除该节点发送的所有的失败报告 */
     di = dictGetSafeIterator(server.cluster->nodes);
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
@@ -922,7 +893,7 @@ void clusterDelNode(clusterNode *delnode) {
     }
     dictReleaseIterator(di);
 
-    /* 3) Free the node, unlinking it from the cluster. */
+    /* 3) 调用freeClusterNode()函数清理 */
     freeClusterNode(delnode);
 }
 
@@ -937,10 +908,9 @@ clusterNode *clusterLookupNode(const char *name) {
     return dictGetVal(de);
 }
 
-/* This is only used after the handshake. When we connect a given IP/PORT
- * as a result of CLUSTER MEET we don't have the node name yet, so we
- * pick a random one, and will fix it when we receive the PONG request using
- * this function. */
+/* 仅在handshake之后使用，当第一次连接一个 IP/PORT 时，
+ * 发送CLUSTER MEET 命令时不知道节点的name，所以随机设置了一个。
+ * 当目标节点返回PONG回复时，就知道了该节点的name，调用该函数为其更新名称 */
 void clusterRenameNode(clusterNode *node, char *newname) {
     int retval;
     sds s = sdsnewlen(node->name, CLUSTER_NAMELEN);
@@ -955,11 +925,10 @@ void clusterRenameNode(clusterNode *node, char *newname) {
 }
 
 /* -----------------------------------------------------------------------------
- * CLUSTER config epoch handling
+ * 集群配置纪元处理
  * -------------------------------------------------------------------------- */
 
-/* Return the greatest configEpoch found in the cluster, or the current
- * epoch if greater than any node configEpoch. */
+/* 返回集群中找到的最大的纪元，如果current epoch比任何节点的纪元都大，则返回current epoch */
 uint64_t clusterGetMaxEpoch(void) {
     uint64_t max = 0;
     dictIterator *di;
@@ -975,35 +944,23 @@ uint64_t clusterGetMaxEpoch(void) {
     return max;
 }
 
-/* If this node epoch is zero or is not already the greatest across the
- * cluster (from the POV of the local configuration), this function will:
+/* 如果节点的纪元为0或者已经不是整个集群中最大的，该函数将会：
+/*
+ *   1. 生成一个新的配置纪元（config epoch），将当前的纪元加1
+ *   2. 为该节点指定新的纪元，不需要一致性
+ *   3. 在发送新的配置之前，将当前配置保存在磁盘上
  *
- * 1) Generate a new config epoch, incrementing the current epoch.
- * 2) Assign the new epoch to this node, WITHOUT any consensus.
- * 3) Persist the configuration on disk before sending packets with the
- *    new configuration.
+ * 如果当前配置纪元被指定和生成，返回C_OK，否则返回C_ERR（因为节点已经有最大的配置），什么也不执行
  *
- * If the new config epoch is generated and assigend, C_OK is returned,
- * otherwise C_ERR is returned (since the node has already the greatest
- * configuration around) and no operation is performed.
+ *  重要提示：如果函数违反了配置纪元应该被一致性的生成原则，那么应该在集群中独一无二存在。
+ * 但是集群在以下情况自动生成配置纪元：
  *
- * Important note: this function violates the principle that config epochs
- * should be generated with consensus and should be unique across the cluster.
- * However Redis Cluster uses this auto-generated new config epochs in two
- * cases:
+ *   1. 当槽被导入后应该关闭，否则重新集群分配非常划不来
+ *   2. 当CLUSTER FAILOVER被指定，强制从节点取故障转移他的主机的，即使没有主节点能够创建新的配置纪元
  *
- * 1) When slots are closed after importing. Otherwise resharding would be
- *    too expensive.
- * 2) When CLUSTER FAILOVER is called with options that force a slave to
- *    failover its master even if there is not master majority able to
- *    create a new configuration epoch.
- *
- * Redis Cluster will not explode using this function, even in the case of
- * a collision between this node and another node, generating the same
- * configuration epoch unilaterally, because the config epoch conflict
- * resolution algorithm will eventually move colliding nodes to different
- * config epochs. However using this function may violate the "last failover
- * wins" rule, so should only be used with care. */
+ * Redis Cluster不会使用此功能而退出，即使在此节点与另一个节点之间发生冲突的情况下，
+ * 单向生成相同的配置纪元，因为配置纪元冲突解决算法最终将冲突节点移动到不同的配置时期。 
+ * 但是使用此功能可能会违反“上次故障切换成功”规则，因此只能小心使用 */
 int clusterBumpConfigEpochWithoutConsensus(void) {
     uint64_t maxEpoch = clusterGetMaxEpoch();
 
@@ -1023,15 +980,13 @@ int clusterBumpConfigEpochWithoutConsensus(void) {
     }
 }
 
-/* This function is called when this node is a master, and we receive from
- * another master a configuration epoch that is equal to our configuration
- * epoch.
+/* 当节点为master节点，接受到另一个master节点的 configuration epoch，
+ * 并且他的 configuration epoch和当前节点的 configuration epoch相等时调用
  *
- * BACKGROUND
+ * 背景
  *
- * It is not possible that different slaves get the same config
- * epoch during a failover election, because the slaves need to get voted
- * by a majority. However when we perform a manual resharding of the cluster
+ * 在一次故障转移的过程中，两个不同的slave节点不可能拥有相同的config epoch, 
+ * 因为slave节点需要获得大多数节点的投票. However when we perform a manual resharding of the cluster
  * the node will assign a configuration epoch to itself without to ask
  * for agreement. Usually resharding happens when the cluster is working well
  * and is supervised by the sysadmin, however it is possible for a failover
@@ -1069,6 +1024,7 @@ int clusterBumpConfigEpochWithoutConsensus(void) {
  * with the greatest Node ID never moves forward, so eventually all the nodes
  * end with a different configuration epoch.
  */
+// 处理配置纪元冲突
 void clusterHandleConfigEpochCollision(clusterNode *sender) {
     /* Prerequisites: nodes have the same configEpoch and are both masters. */
     if (sender->configEpoch != myself->configEpoch ||
@@ -1087,36 +1043,18 @@ void clusterHandleConfigEpochCollision(clusterNode *sender) {
 }
 
 /* -----------------------------------------------------------------------------
- * CLUSTER nodes blacklist
+ * 集群节点黑名单
  *
- * The nodes blacklist is just a way to ensure that a given node with a given
- * Node ID is not readded before some time elapsed (this time is specified
- * in seconds in CLUSTER_BLACKLIST_TTL).
+ * 黑名单是一种保证一个指定的node id的节点在CLUSTER_BLACKLIST_TTL时间结束前被读取到的方案
  *
- * This is useful when we want to remove a node from the cluster completely:
- * when CLUSTER FORGET is called, it also puts the node into the blacklist so
- * that even if we receive gossip messages from other nodes that still remember
- * about the node we want to remove, we don't re-add it before some time.
- *
- * Currently the CLUSTER_BLACKLIST_TTL is set to 1 minute, this means
- * that redis-trib has 60 seconds to send CLUSTER FORGET messages to nodes
- * in the cluster without dealing with the problem of other nodes re-adding
- * back the node to nodes we already sent the FORGET command to.
- *
- * The data structure used is a hash table with an sds string representing
- * the node ID as key, and the time when it is ok to re-add the node as
- * value.
+ * 当我们想将一个节点从集群中完全移出时很有用，当 CLUSTER FORGET命令被执行，同时将node放到和名单中，
+ * 即便其他节点还记得他，我们收到相应的gossip信息，也不会将该节点加回来
  * -------------------------------------------------------------------------- */
 
 #define CLUSTER_BLACKLIST_TTL 60      /* 1 minute. */
 
 
-/* Before of the addNode() or Exists() operations we always remove expired
- * entries from the black list. This is an O(N) operation but it is not a
- * problem since add / exists operations are called very infrequently and
- * the hash table is supposed to contain very little elements at max.
- * However without the cleanup during long uptimes and with some automated
- * node add/removal procedures, entries could accumulate. */
+/* 每次执行addNode() 和 Exists() 操作之前，我们都会清理过期的黑名单 */
 void clusterBlacklistCleanup(void) {
     dictIterator *di;
     dictEntry *de;
@@ -1131,15 +1069,13 @@ void clusterBlacklistCleanup(void) {
     dictReleaseIterator(di);
 }
 
-/* Cleanup the blacklist and add a new node ID to the black list. */
+/* 清理黑名单并添加一个ID到黑名单中 */
 void clusterBlacklistAddNode(clusterNode *node) {
     dictEntry *de;
     sds id = sdsnewlen(node->name,CLUSTER_NAMELEN);
 
     clusterBlacklistCleanup();
     if (dictAdd(server.cluster->nodes_black_list,id,NULL) == DICT_OK) {
-        /* If the key was added, duplicate the sds string representation of
-         * the key for the next lookup. We'll free it at the end. */
         id = sdsdup(id);
     }
     de = dictFind(server.cluster->nodes_black_list,id);
@@ -1147,9 +1083,6 @@ void clusterBlacklistAddNode(clusterNode *node) {
     sdsfree(id);
 }
 
-/* Return non-zero if the specified node ID exists in the blacklist.
- * You don't need to pass an sds string here, any pointer to 40 bytes
- * will work. */
 int clusterBlacklistExists(char *nodeid) {
     sds id = sdsnewlen(nodeid,CLUSTER_NAMELEN);
     int retval;
@@ -1161,41 +1094,35 @@ int clusterBlacklistExists(char *nodeid) {
 }
 
 /* -----------------------------------------------------------------------------
- * CLUSTER messages exchange - PING/PONG and gossip
+ * 集群信息交换 - PING/PONG 和 gossip
  * -------------------------------------------------------------------------- */
 
-/* This function checks if a given node should be marked as FAIL.
- * It happens if the following conditions are met:
+/* 该函数检查给定的node是否应该标记为FAIL（当满足以下条件）
  *
- * 1) We received enough failure reports from other master nodes via gossip.
- *    Enough means that the majority of the masters signaled the node is
- *    down recently.
- * 2) We believe this node is in PFAIL state.
+ * 1) 我们通过gossip协议从其他主节点接受到足够的失败报告
+ *    足够的意思是大多数主节点认为该节点状态的down
+ * 2) 我们认为该节点是PFAIL状态
+ * 
+ * 当我们检查到该节点为异常状态，那我我们会通知集群中所有其他节点，尝试让其他节点也将该节点状态标记为FAIL
  *
- * If a failure is detected we also inform the whole cluster about this
- * event trying to force every other node to set the FAIL flag for the node.
+ *  这种判断节点下线的方法是弱（weak）的，因为我们在一段时间内收集大多数的
+ *  主节点状态并且即使我们是强制通过传播 FAIL 消息来征求同意，由于分区的问
+ *  题我们无法可达每一个节点。但是：
  *
- * Note that the form of agreement used here is weak, as we collect the majority
- * of masters state during some time, and even if we force agreement by
- * propagating the FAIL message, because of partitions we may not reach every
- * node. However:
- *
- * 1) Either we reach the majority and eventually the FAIL state will propagate
- *    to all the cluster.
- * 2) Or there is no majority so no slave promotion will be authorized and the
- *    FAIL flag will be cleared after some time.
+ * 1) 只要我们达到了大多数，最终 FAIL 状态会传播到所有的集群中
+ * 2) 没有达到大多数所以不能晋升从节点，会在一段时间内将 FAIL 标识清除
  */
 void markNodeAsFailingIfNeeded(clusterNode *node) {
     int failures;
     int needed_quorum = (server.cluster->size / 2) + 1;
 
-    if (!nodeTimedOut(node)) return; /* We can reach it. */
-    if (nodeFailed(node)) return; /* Already FAILing. */
+    if (!nodeTimedOut(node)) return; /* 节点可达，返回 */
+    if (nodeFailed(node)) return; /* 已经是FAIL状态 */
 
     failures = clusterNodeFailureReportsCount(node);
-    /* Also count myself as a voter if I'm a master. */
+    /* 如果自己是主节点，自己也投票 */
     if (nodeIsMaster(myself)) failures++;
-    if (failures < needed_quorum) return; /* No weak agreement from masters. */
+    if (failures < needed_quorum) return; /* 认为该节点异常的票数小于一半 */
 
     serverLog(LL_NOTICE,
         "Marking node %.40s as failing (quorum reached).", node->name);
@@ -1205,22 +1132,18 @@ void markNodeAsFailingIfNeeded(clusterNode *node) {
     node->flags |= CLUSTER_NODE_FAIL;
     node->fail_time = mstime();
 
-    /* Broadcast the failing node name to everybody, forcing all the other
-     * reachable nodes to flag the node as FAIL. */
+    /* 广播该节点失败的消息 */
     if (nodeIsMaster(myself)) clusterSendFail(node->name);
     clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE|CLUSTER_TODO_SAVE_CONFIG);
 }
 
-/* This function is called only if a node is marked as FAIL, but we are able
- * to reach it again. It checks if there are the conditions to undo the FAIL
- * state. */
+/* 只有一个节点被标记为FAIL的状态该函数才会被调用，但是我们对于该节点再次可达，需要检查是否取消该节点的FAIL标识 */
 void clearNodeFailureIfNeeded(clusterNode *node) {
     mstime_t now = mstime();
 
     serverAssert(nodeFailed(node));
 
-    /* For slaves we always clear the FAIL flag if we can contact the
-     * node again. */
+    /* 如果node节点是从节点，并且我们能够可达该节点，清除对应的FAIL标识 */
     if (nodeIsSlave(node) || node->numslots == 0) {
         serverLog(LL_NOTICE,
             "Clear FAIL state for node %.40s: %s is reachable again.",
@@ -1230,13 +1153,13 @@ void clearNodeFailureIfNeeded(clusterNode *node) {
         clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE|CLUSTER_TODO_SAVE_CONFIG);
     }
 
-    /* If it is a master and...
-     * 1) The FAIL state is old enough.
-     * 2) It is yet serving slots from our point of view (not failed over).
-     * Apparently no one is going to fix these slots, clear the FAIL flag. */
+    /* 如果该节点是主节点
+     * 1) 失败的状态已经过去足够的时间
+     * 2) 其依然负责一部分的slot（没有故障转移）
+     * 显然没有节点能够修复这些slot，清除FAIL标记 */
     if (nodeIsMaster(node) && node->numslots > 0 &&
         (now - node->fail_time) >
-        (server.cluster_node_timeout * CLUSTER_FAIL_UNDO_TIME_MULT))
+        (server.cluster_node_timeout * CLUSTER_FAIL_UNDO_TIME_MULT)) // 15000 * 2
     {
         serverLog(LL_NOTICE,
             "Clear FAIL state for node %.40s: is reachable again and nobody is serving its slots after some time.",
@@ -1246,9 +1169,7 @@ void clearNodeFailureIfNeeded(clusterNode *node) {
     }
 }
 
-/* Return true if we already have a node in HANDSHAKE state matching the
- * specified ip address and port number. This function is used in order to
- * avoid adding a new handshake node for the same address multiple times. */
+/* 如果当前ip和port的节点处于握手状态的话，返回1，该函数被用来避免重复和相同地址的节点进行handshake */
 int clusterHandshakeInProgress(char *ip, int port, int cport) {
     dictIterator *di;
     dictEntry *de;
@@ -1266,13 +1187,10 @@ int clusterHandshakeInProgress(char *ip, int port, int cport) {
     return de != NULL;
 }
 
-/* Start an handshake with the specified address if there is not one
- * already in progress. Returns non-zero if the handshake was actually
- * started. On error zero is returned and errno is set to one of the
- * following values:
- *
- * EAGAIN - There is already an handshake in progress for this address.
- * EINVAL - IP or port are not valid. */
+/* 如果没有正在进行握手，那么根据执行的地址开始进行握手
+ * 握手开始返回非零,出错返回0，且设置errno
+ * EAGAIN：该地址应处于握手状态
+ * EINVAL：地址非法*/
 int clusterStartHandshake(char *ip, int port, int cport) {
     clusterNode *n;
     char norm_ip[NET_IP_STR_LEN];
@@ -1315,9 +1233,7 @@ int clusterStartHandshake(char *ip, int port, int cport) {
         return 0;
     }
 
-    /* Add the node with a random address (NULL as first argument to
-     * createClusterNode()). Everything will be fixed during the
-     * handshake. */
+    /* 为node设置一个随机的名字，当握手完成时会为其设置真正的名字 */
     n = createClusterNode(NULL,CLUSTER_NODE_HANDSHAKE|CLUSTER_NODE_MEET);
     memcpy(n->ip,norm_ip,sizeof(n->ip));
     n->port = port;
@@ -1326,10 +1242,7 @@ int clusterStartHandshake(char *ip, int port, int cport) {
     return 1;
 }
 
-/* Process the gossip section of PING or PONG packets.
- * Note that this function assumes that the packet is already sanity-checked
- * by the caller, not in the content of the gossip section, but in the
- * length. */
+/* 处理gossip部分的PING和PONG包 */
 void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
     uint16_t count = ntohs(hdr->count);
     clusterMsgDataGossip *g = (clusterMsgDataGossip*) hdr->data.ping.gossip;
@@ -1351,20 +1264,22 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
             sdsfree(ci);
         }
 
-        /* Update our state accordingly to the gossip sections */
         node = clusterLookupNode(g->nodename);
         if (node) {
-            /* We already know this node.
-               Handle failure reports, only when the sender is a master. */
+            
+            /* 如果该节点已经存在集群中 && 节点是master && 不是自身 */
             if (sender && nodeIsMaster(sender) && node != myself) {
+                // 判断该节点是够处于FAIL状态
                 if (flags & (CLUSTER_NODE_FAIL|CLUSTER_NODE_PFAIL)) {
                     if (clusterNodeAddFailureReport(node,sender)) {
                         serverLog(LL_VERBOSE,
                             "Node %.40s reported node %.40s as not reachable.",
                             sender->name, node->name);
                     }
+                    // 标记失败状态
                     markNodeAsFailingIfNeeded(node);
                 } else {
+                    // 节点可达，删除失败报告
                     if (clusterNodeDelFailureReport(node,sender)) {
                         serverLog(LL_VERBOSE,
                             "Node %.40s reported node %.40s is back online.",
@@ -1376,7 +1291,8 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
             /* If from our POV the node is up (no failure flags are set),
              * we have no pending ping for the node, nor we have failure
              * reports for this node, update the last pong time with the
-             * one we see from the other nodes. */
+             * one we see from the other nodes. 
+             * 如果我们认为该节点是启动状态，没有等待发动的ping包，也没有该节点的失败报告，*/
             if (!(flags & (CLUSTER_NODE_FAIL|CLUSTER_NODE_PFAIL)) &&
                 node->ping_sent == 0 &&
                 clusterNodeFailureReportsCount(node) == 0)
@@ -1395,11 +1311,7 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                 }
             }
 
-            /* If we already know this node, but it is not reachable, and
-             * we see a different address in the gossip section of a node that
-             * can talk with this other node, update the address, disconnect
-             * the old link if any, so that we'll attempt to connect with the
-             * new address. */
+            /* 如果已经知道该节点，但是不可达，并且地址与之前不同，则更新地址，释放与之前地址的连接，尝试连接新的地址 */
             if (node->flags & (CLUSTER_NODE_FAIL|CLUSTER_NODE_PFAIL) &&
                 !(flags & CLUSTER_NODE_NOADDR) &&
                 !(flags & (CLUSTER_NODE_FAIL|CLUSTER_NODE_PFAIL)) &&
@@ -1414,28 +1326,22 @@ void clusterProcessGossipSection(clusterMsg *hdr, clusterLink *link) {
                 node->flags &= ~CLUSTER_NODE_NOADDR;
             }
         } else {
-            /* If it's not in NOADDR state and we don't have it, we
-             * start a handshake process against this IP/PORT pairs.
-             *
-             * Note that we require that the sender of this gossip message
-             * is a well known node in our cluster, otherwise we risk
-             * joining another cluster. */
+            /* 如果节点不处于CLUSTER_NODE_NOADDR状态，并且不在不处于黑名单中 */
             if (sender &&
                 !(flags & CLUSTER_NODE_NOADDR) &&
                 !clusterBlacklistExists(g->nodename))
             {
+                // 开始Handshake(
                 clusterStartHandshake(g->ip,ntohs(g->port),ntohs(g->cport));
             }
         }
 
-        /* Next node */
+        /* 下一个节点 */
         g++;
     }
 }
 
-/* IP -> string conversion. 'buf' is supposed to at least be 46 bytes.
- * If 'announced_ip' length is non-zero, it is used instead of extracting
- * the IP from the socket peer address. */
+/* IP转换为字符串 */
 void nodeIp2String(char *buf, clusterLink *link, char *announced_ip) {
     if (announced_ip[0] != '\0') {
         memcpy(buf,announced_ip,NET_IP_STR_LEN);
@@ -1445,18 +1351,12 @@ void nodeIp2String(char *buf, clusterLink *link, char *announced_ip) {
     }
 }
 
-/* Update the node address to the IP address that can be extracted
- * from link->fd, or if hdr->myip is non empty, to the address the node
- * is announcing us. The port is taken from the packet header as well.
+/* 更新节点的IP地址，可以从link的fd参数中获取，或者如果hdr的myip参数不为空的化，可以直接获取到，端口也在包的请求头中
  *
- * If the address or port changed, disconnect the node link so that we'll
- * connect again to the new address.
+ * 如果地址和端口改变了，可以端口连接从而连接到新的地址
+ * 如果IP和端口都正确的话，不需要做任何操作
  *
- * If the ip/port pair are already correct no operation is performed at
- * all.
- *
- * The function returns 0 if the node address is still the same,
- * otherwise 1 is returned. */
+ * 如果节点地址不变返回0，否则返回1 */
 int nodeUpdateAddressIfNeeded(clusterNode *node, clusterLink *link,
                               clusterMsg *hdr)
 {
@@ -1464,19 +1364,13 @@ int nodeUpdateAddressIfNeeded(clusterNode *node, clusterLink *link,
     int port = ntohs(hdr->port);
     int cport = ntohs(hdr->cport);
 
-    /* We don't proceed if the link is the same as the sender link, as this
-     * function is designed to see if the node link is consistent with the
-     * symmetric link that is used to receive PINGs from the node.
-     *
-     * As a side effect this function never frees the passed 'link', so
-     * it is safe to call during packet processing. */
     if (link == node->link) return 0;
 
     nodeIp2String(ip,link,hdr->myip);
     if (node->port == port && node->cport == cport &&
         strcmp(ip,node->ip) == 0) return 0;
 
-    /* IP / port is different, update it. */
+    /* IP/端口不同，更新 */
     memcpy(node->ip,ip,sizeof(ip));
     node->port = port;
     node->cport = cport;
@@ -1485,16 +1379,13 @@ int nodeUpdateAddressIfNeeded(clusterNode *node, clusterLink *link,
     serverLog(LL_WARNING,"Address updated for node %.40s, now %s:%d",
         node->name, node->ip, node->port);
 
-    /* Check if this is our master and we have to change the
-     * replication target as well. */
+    /* 如果该节点是当前节点的master，则master信息也要更新 */
     if (nodeIsSlave(myself) && myself->slaveof == node)
         replicationSetMaster(node->ip, node->port);
     return 1;
 }
 
-/* Reconfigure the specified node 'n' as a master. This function is called when
- * a node that we believed to be a slave is now acting as master in order to
- * update the state of the node. */
+/* 将节点n重置配置为master，当一个slave节点变成master节点时调用，用来更新节点状态 */
 void clusterSetNodeAsMaster(clusterNode *n) {
     if (nodeIsMaster(n)) return;
 
@@ -1506,18 +1397,14 @@ void clusterSetNodeAsMaster(clusterNode *n) {
     n->flags |= CLUSTER_NODE_MASTER;
     n->slaveof = NULL;
 
-    /* Update config and state. */
     clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
                          CLUSTER_TODO_UPDATE_STATE);
 }
 
-/* This function is called when we receive a master configuration via a
- * PING, PONG or UPDATE packet. What we receive is a node, a configEpoch of the
- * node, and the set of slots claimed under this configEpoch.
+/* 当我们通过PING，PONG和UPDATE命令接受到主节点的配置时调用. 
+ * 函数接受节点，配置纪元，和该配置纪元声明的slotsh.
  *
- * What we do is to rebind the slots with newer configuration compared to our
- * local configuration, and if needed, we turn ourself into a replica of the
- * node (see the function comments for more info).
+ * 重新绑定哪些对于本地配置更新了的slot归属信息，如果有需要的话，本节点可以变成该节点的从节点
  *
  * The 'sender' is the node for which we received a configuration update.
  * Sometimes it is not actually the "Sender" of the information, like in the
@@ -1535,9 +1422,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     uint16_t dirty_slots[CLUSTER_SLOTS];
     int dirty_slots_count = 0;
 
-    /* Here we set curmaster to this node or the node this node
-     * replicates to if it's a slave. In the for loop we are
-     * interested to check if slots are taken away from curmaster. */
+    /* 当前节点（已经是master）或者当前节点的master */
     curmaster = nodeIsMaster(myself) ? myself : myself->slaveof;
 
     if (sender == myself) {
@@ -1546,25 +1431,21 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
     }
 
     for (j = 0; j < CLUSTER_SLOTS; j++) {
+        // Return 1 if the bit is set
         if (bitmapTestBit(slots,j)) {
-            /* The slot is already bound to the sender of this message. */
+            /* 该节点已经绑定到sender */
             if (server.cluster->slots[j] == sender) continue;
 
-            /* The slot is in importing state, it should be modified only
-             * manually via redis-trib (example: a resharding is in progress
-             * and the migrating side slot was already closed and is advertising
-             * a new config. We still want the slot to be closed manually). */
+            /* slot在导入的过程中 */
             if (server.cluster->importing_slots_from[j]) continue;
 
-            /* We rebind the slot to the new node claiming it if:
-             * 1) The slot was unassigned or the new node claims it with a
-             *    greater configEpoch.
-             * 2) We are not currently importing the slot. */
+            /* 满足以下情况，将slot绑定到新的节点:
+             * 1) slot没有被指定或者一个拥有更大的配置纪元的节点声称对该slot负责
+             * 2) 我们没有正在导入该slot */
             if (server.cluster->slots[j] == NULL ||
                 server.cluster->slots[j]->configEpoch < senderConfigEpoch)
             {
-                /* Was this slot mine, and still contains keys? Mark it as
-                 * a dirty slot. */
+                /* 当前节点负责该slot，并且slot中还有数据 */
                 if (server.cluster->slots[j] == myself &&
                     countKeysInSlot(j) &&
                     sender != myself)
@@ -1572,7 +1453,7 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
                     dirty_slots[dirty_slots_count] = j;
                     dirty_slots_count++;
                 }
-
+                // 如果该slot是curmaster负责的，那么说明发生了故障迁移
                 if (server.cluster->slots[j] == curmaster)
                     newmaster = sender;
                 clusterDelSlot(j);
@@ -1584,19 +1465,13 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
         }
     }
 
-    /* After updating the slots configuration, don't do any actual change
-     * in the state of the server if a module disabled Redis Cluster
-     * keys redirections. */
+    /* 如果禁用了redis集群keys重定向模块，slot的配置被更新之后，不做任何实质性的改变 */
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return;
 
-    /* If at least one slot was reassigned from a node to another node
-     * with a greater configEpoch, it is possible that:
-     * 1) We are a master left without slots. This means that we were
-     *    failed over and we should turn into a replica of the new
-     *    master.
-     * 2) We are a slave and our master is left without slots. We need
-     *    to replicate to the new slots owner. */
+    /* 如果至少一个slot被转移到更大配置纪元的节点，那么可能:
+     * 1) 当前节点是主节点并且没有负责任何的slot，那么意味着当前节点被故障转移了，应该从新的master节点同步数据.
+     * 2) 当前节点是slave节点，并且当前节点的master不负责任何slot，我们需要从一个新的负责slot的主节点同步数据 */
     if (newmaster && curmaster->numslots == 0) {
         serverLog(LL_WARNING,
             "Configuration change detected. Reconfiguring myself "
@@ -1606,27 +1481,19 @@ void clusterUpdateSlotsConfigWith(clusterNode *sender, uint64_t senderConfigEpoc
                              CLUSTER_TODO_UPDATE_STATE|
                              CLUSTER_TODO_FSYNC_CONFIG);
     } else if (dirty_slots_count) {
-        /* If we are here, we received an update message which removed
-         * ownership for certain slots we still have keys about, but still
-         * we are serving some slots, so this master node was not demoted to
-         * a slave.
-         *
-         * In order to maintain a consistent state between keys and slots
-         * we need to remove all the keys from the slots we lost. */
+        /* 如果执行到这里，我们接收到一个删除当前我们负责槽的所有者的更新消息，
+         * 但是我们仍然负责该槽，所以主节点不能被降级为从节点
+         * 为了保持键和槽的关系，需要从我们丢失的槽中将键删除 */
         for (j = 0; j < dirty_slots_count; j++)
             delKeysInSlot(dirty_slots[j]);
     }
 }
 
-/* When this function is called, there is a packet to process starting
- * at node->rcvbuf. Releasing the buffer is up to the caller, so this
- * function should just handle the higher level stuff of processing the
- * packet, modifying the cluster state if needed.
- *
- * The function returns 1 if the link is still valid after the packet
- * was processed, otherwise 0 if the link was freed since the packet
- * processing lead to some inconsistency error (for instance a PONG
- * received from the wrong sender ID). */
+/* 调用此函数时，node->rcvbuf中有一个数据包要开始处理。
+ * 释放缓冲区是由调用者决定的，所以这个函数应该只处理数据包的
+ * 更高级别的工作，如果有需要，可以修改集群状态。如果处理数据包后
+ * 链接仍然有效，则函数返回1；否则，如果由于数据包处理导致某些
+ * 不一致错误（例如，从错误的发送方ID接收到的PONG）而释放了链接，则函数返回0。*/
 int clusterProcessPacket(clusterLink *link) {
     clusterMsg *hdr = (clusterMsg*) link->rcvbuf;
     uint32_t totlen = ntohl(hdr->totlen);
@@ -1634,16 +1501,16 @@ int clusterProcessPacket(clusterLink *link) {
     mstime_t now = mstime();
 
     if (type < CLUSTERMSG_TYPE_COUNT)
+        // 对应类别的消息数量+1
         server.cluster->stats_bus_messages_received[type]++;
     serverLog(LL_DEBUG,"--- Processing packet of type %d, %lu bytes",
         type, (unsigned long) totlen);
 
-    /* Perform sanity checks */
-    if (totlen < 16) return 1; /* At least signature, version, totlen, count. */
-    if (totlen > sdslen(link->rcvbuf)) return 1;
+    if (totlen < 16) return 1; /* 消息总长度小于16（至少包含signature, version, totlen, count） */
+    if (totlen > sdslen(link->rcvbuf)) return 1; // 消息长度大于buffer大小
 
     if (ntohs(hdr->ver) != CLUSTER_PROTO_VER) {
-        /* Can't handle messages of different versions. */
+        /* 消息版本不一致，不能处理，当前只有一种版本 */
         return 1;
     }
 
@@ -1651,14 +1518,16 @@ int clusterProcessPacket(clusterLink *link) {
     uint64_t senderCurrentEpoch = 0, senderConfigEpoch = 0;
     clusterNode *sender;
 
+    // 如果是PING，PONG或者MEET中的一种
     if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_PONG ||
         type == CLUSTERMSG_TYPE_MEET)
     {
         uint16_t count = ntohs(hdr->count);
         uint32_t explen; /* expected length of this packet */
-
+        // 计算消息理论上的长度
         explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
         explen += (sizeof(clusterMsgDataGossip)*count);
+        // 如果消息长度不一致，则返回1
         if (totlen != explen) return 1;
     } else if (type == CLUSTERMSG_TYPE_FAIL) {
         uint32_t explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
@@ -1693,24 +1562,20 @@ int clusterProcessPacket(clusterLink *link) {
         if (totlen != explen) return 1;
     }
 
-    /* Check if the sender is a known node. Note that for incoming connections
-     * we don't store link->node information, but resolve the node by the
-     * ID in the header each time in the current implementation. */
+    /* 检测sender是不是已知的节点，注意，在当前的实现中我们不存储link->node的信息，
+     * 但是在每次通过header中的ID解析节点 */
     sender = clusterLookupNode(hdr->sender);
 
-    /* Update the last time we saw any data from this node. We
-     * use this in order to avoid detecting a timeout from a node that
-     * is just sending a lot of data in the cluster bus, for instance
-     * because of Pub/Sub. */
+    /* 更新最后一次接受数据的时间，用于判断超时 */
     if (sender) sender->data_received = now;
 
     if (sender && !nodeInHandshake(sender)) {
-        /* Update our curretEpoch if we see a newer epoch in the cluster. */
+        /* 更新纪元 */
         senderCurrentEpoch = ntohu64(hdr->currentEpoch);
         senderConfigEpoch = ntohu64(hdr->configEpoch);
         if (senderCurrentEpoch > server.cluster->currentEpoch)
             server.cluster->currentEpoch = senderCurrentEpoch;
-        /* Update the sender configEpoch if it is publishing a newer one. */
+        /* 更新配置纪元 */
         if (senderConfigEpoch > sender->configEpoch) {
             sender->configEpoch = senderConfigEpoch;
             clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
@@ -1735,21 +1600,15 @@ int clusterProcessPacket(clusterLink *link) {
         }
     }
 
-    /* Initial processing of PING and MEET requests replying with a PONG. */
+    /* 初始化对PING和MEET的回复，回复PONG */
     if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_MEET) {
         serverLog(LL_DEBUG,"Ping packet received: %p", (void*)link->node);
 
-        /* We use incoming MEET messages in order to set the address
-         * for 'myself', since only other cluster nodes will send us
-         * MEET messages on handshakes, when the cluster joins, or
-         * later if we changed address, and those nodes will use our
-         * official address to connect to us. So by obtaining this address
-         * from the socket is a simple way to discover / update our own
-         * address in the cluster without it being hardcoded in the config.
-         *
-         * However if we don't have an address at all, we update the address
-         * even with a normal PING packet. If it's wrong it will be fixed
-         * by MEET later. */
+        /* 我们使用传入的MEET消息来设置'myself'的地址，因为只有其他集群节点在握手时、
+         * 集群加入时或以后更改地址时向我们发送MEET消息，这些节点将使用我们的官方地址来
+         * 连接我们。因此，通过从套接字获取此地址是在集群中发现/更新自己的地址的简单方法，
+         * 而无需在配置中硬编码。但是，如果我们根本没有地址，即使使用普通的PING包也会更新地址。
+         * 如果是错的，会在以后通过MEET来修复。*/
         if ((type == CLUSTERMSG_TYPE_MEET || myself->ip[0] == '\0') &&
             server.cluster_announce_ip == NULL)
         {
@@ -1765,10 +1624,8 @@ int clusterProcessPacket(clusterLink *link) {
             }
         }
 
-        /* Add this node if it is new for us and the msg type is MEET.
-         * In this stage we don't try to add the node with the right
-         * flags, slaveof pointer, and so forth, as this details will be
-         * resolved when we'll receive PONGs from the node. */
+        /* 如果当前sender节点是一个新的节点，并且消息是MEET消息类型，那么将这个节点添加到集群中
+         * 当前该节点的flags、slaveof等等都没有正确设置，当从其他节点接收到PONG时可以从中获取到信息 */
         if (!sender && type == CLUSTERMSG_TYPE_MEET) {
             clusterNode *node;
 
@@ -1780,17 +1637,15 @@ int clusterProcessPacket(clusterLink *link) {
             clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
         }
 
-        /* If this is a MEET packet from an unknown node, we still process
-         * the gossip section here since we have to trust the sender because
-         * of the message type. */
+        /* 如果这个MEET包来自一个未知的节点，我们任然要处理gossip部分，因为message的格式，我们必须信任sender */
         if (!sender && type == CLUSTERMSG_TYPE_MEET)
             clusterProcessGossipSection(hdr,link);
 
-        /* Anyway reply with a PONG */
+        /* 回复PONG */
         clusterSendPing(link,CLUSTERMSG_TYPE_PONG);
     }
 
-    /* PING, PONG, MEET: process config information. */
+    /* PING, PONG, MEET: 处理配置信息 */
     if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_PONG ||
         type == CLUSTERMSG_TYPE_MEET)
     {
@@ -2607,7 +2462,8 @@ void clusterSendPublish(clusterLink *link, robj *channel, robj *message) {
  * The FAIL message is sent when we detect that a node is failing
  * (CLUSTER_NODE_PFAIL) and we also receive a gossip confirmation of this:
  * we switch the node state to CLUSTER_NODE_FAIL and ask all the other
- * nodes to do the same ASAP. */
+ * nodes to do the same ASAP. 
+ * 向所有可达的节点发布指定节点失败的信息。*/
 void clusterSendFail(char *nodename) {
     clusterMsg buf[1];
     clusterMsg *hdr = (clusterMsg*) buf;
