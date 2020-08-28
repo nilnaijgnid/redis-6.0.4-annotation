@@ -379,7 +379,7 @@ int clusterLockConfig(char *filename) {
 }
 
 /* 基于节点当前的配置，一些标记（目前只有NOFAILOVER）可能需要更新。
- * 可以在运行是通过CONFIG SET命令设置。该函数对应改变myself->flags的状态集 */
+ * 可以在运行时通过CONFIG SET命令设置。该函数对应改变myself->flags的状态集 */
 void clusterUpdateMyselfFlags(void) {
     int oldflags = myself->flags;
     int nofailover = server.cluster_slave_no_failover ?
@@ -2760,11 +2760,11 @@ void clusterFailoverReplaceYourMaster(void) {
     resetManualFailover();
 }
 
-/* 如果当前节点是一个从节点，并且它负责有槽的主节点处于FAIL状态，调用该函数
+/* 如果当前节点是一个从节点，并且它的master负责slot而且处于FAIL状态，调用该函数
  * 这个函数的目标是：
  *
  *  1. 检查是否可以对主节点执行一次故障转移，节点的关于主节点的信息是否需要更新
- *  2. 尝试选举一个主节点
+ *  2. 尝试被其他master节点选举为一个主节点
  *  3. 执行故障转移并通知所有的其他节点 */
 void clusterHandleSlaveFailover(void) {
     mstime_t data_age;
@@ -2805,7 +2805,7 @@ void clusterHandleSlaveFailover(void) {
         data_age = (mstime_t)(server.unixtime - server.repl_down_since) * 1000;
     }
 
-    /* 从数据时代删除节点超时，因为我们与我们的主服务器断开连接，至少在被标记为FAIL的时候，这是基准。
+    /* 从data_age删除节点超时，因为我们与我们的主服务器断开连接，至少在被标记为FAIL的时候，这是基准。
      * 从data_age删除一个cluster_node_timeout的时长，因为至少以从节点和主节点断开连接开始，因为超时的时间不算在内 */
     if (data_age > server.cluster_node_timeout)
         data_age -= server.cluster_node_timeout;
@@ -2879,7 +2879,7 @@ void clusterHandleSlaveFailover(void) {
         return;
     }
 
-    /* 如果距离故障转移的时间过了很久，那么不在执行故障转移，直接返回 */
+    /* 如果距离故障转移的时间过了很久，那么不再执行故障转移，直接返回 */
     if (auth_age > auth_timeout) {
         clusterLogCantFailover(CLUSTER_CANT_FAILOVER_EXPIRED);
         return;
@@ -3181,7 +3181,7 @@ void clusterCron(void) {
     }
     dictReleaseIterator(di);
 
-    /* 每10个迭代向一个随机的节点发送PING，所以我们一般ping一个随机的节点 */
+    /* 每10个迭代向一个随机的节点发送PING，所以我们一般美妙ping一个随机的节点 */
     if (!(iteration % 10)) {
         int j;
 
@@ -3512,22 +3512,17 @@ void clusterUpdateState(void) {
 
     server.cluster->todo_before_sleep &= ~CLUSTER_TODO_UPDATE_STATE;
 
-    /* If this is a master node, wait some time before turning the state
-     * into OK, since it is not a good idea to rejoin the cluster as a writable
-     * master, after a reboot, without giving the cluster a chance to
-     * reconfigure this node. Note that the delay is calculated starting from
-     * the first call to this function and not since the server start, in order
-     * to don't count the DB loading time. */
+    /* 如果这是一个主节点，将状态转换为ok之前需要等待一段时间, 因此重启之后没有给集群配置节点的机会不是一个好想法
+     * 注意：delay 是从该函数第一次被调用开始计算。以便不将DB文件加载的时间算在内 */
     if (first_call_time == 0) first_call_time = mstime();
     if (nodeIsMaster(myself) &&
         server.cluster->state == CLUSTER_FAIL &&
         mstime() - first_call_time < CLUSTER_WRITABLE_DELAY) return;
 
-    /* Start assuming the state is OK. We'll turn it into FAIL if there
-     * are the right conditions. */
+    /* 一开始我们假设状态是OK的，如果满足一定的条件，我们将状态设置为FAIL */
     new_state = CLUSTER_OK;
 
-    /* Check if all the slots are covered. */
+    /* 检查是否所有的slot都被覆盖 */
     if (server.cluster_require_full_coverage) {
         for (j = 0; j < CLUSTER_SLOTS; j++) {
             if (server.cluster->slots[j] == NULL ||
@@ -3539,11 +3534,8 @@ void clusterUpdateState(void) {
         }
     }
 
-    /* Compute the cluster size, that is the number of master nodes
-     * serving at least a single slot.
-     *
-     * At the same time count the number of reachable masters having
-     * at least one slot. */
+    /* 计算集群的大小，也就是负责了slot的master节点的数量
+     * 同时计算可达的负责了slot的master的数量 */
     {
         dictIterator *di;
         dictEntry *de;
@@ -3562,8 +3554,7 @@ void clusterUpdateState(void) {
         dictReleaseIterator(di);
     }
 
-    /* If we are in a minority partition, change the cluster state
-     * to FAIL. */
+    /* 如果我们处于较小的分区中，也就是数量不足一半，则将集群的状态设置为FAIL */
     {
         int needed_quorum = (server.cluster->size / 2) + 1;
 
@@ -3573,14 +3564,11 @@ void clusterUpdateState(void) {
         }
     }
 
-    /* Log a state change */
+    /* 记录状态变更日志 */
     if (new_state != server.cluster->state) {
         mstime_t rejoin_delay = server.cluster_node_timeout;
 
-        /* If the instance is a master and was partitioned away with the
-         * minority, don't let it accept queries for some time after the
-         * partition heals, to make sure there is enough time to receive
-         * a configuration update. */
+        /* 如果一个处于少部分的节点恢复之后，需要等待一段时间之后才接受查询请求，为了给其足够的时间接受集群的配置更新 */
         if (rejoin_delay > CLUSTER_MAX_REJOIN_DELAY)
             rejoin_delay = CLUSTER_MAX_REJOIN_DELAY;
         if (rejoin_delay < CLUSTER_MIN_REJOIN_DELAY)
@@ -3593,35 +3581,21 @@ void clusterUpdateState(void) {
             return;
         }
 
-        /* Change the state and log the event. */
+        /* 改变状态并记录日志 */
         serverLog(LL_WARNING,"Cluster state changed: %s",
             new_state == CLUSTER_OK ? "ok" : "fail");
         server.cluster->state = new_state;
     }
 }
 
-/* This function is called after the node startup in order to verify that data
- * loaded from disk is in agreement with the cluster configuration:
+/* 该函数在节点启动之后调用，为了验证从磁盘加载的数据和集群的配置是一致的 
  *
- * 1) If we find keys about hash slots we have no responsibility for, the
- *    following happens:
- *    A) If no other node is in charge according to the current cluster
- *       configuration, we add these slots to our node.
- *    B) If according to our config other nodes are already in charge for
- *       this lots, we set the slots as IMPORTING from our point of view
- *       in order to justify we have those slots, and in order to make
- *       redis-trib aware of the issue, so that it can try to fix it.
- * 2) If we find data in a DB different than DB0 we return C_ERR to
- *    signal the caller it should quit the server with an error message
- *    or take other actions.
+ * 1) 如果我们发现不是自己负责的slot，那么会发生以下情况:
+ *    A) 如果当前没有其他节点对这些slot负责，我们会将这些slot加入到自身
+ *    B) 如果已经有其他节点负责这些slot，我们将slot状态设置为IMPORTING，这样可以通知到redis-trib并尝试修复
+ * 2) 如果我们发现DB中的数据与DB0中的不一致，则向调用者返回C_ERR，然后应当停止服务并采取其他措施
  *
- * The function always returns C_OK even if it will try to correct
- * the error described in "1". However if data is found in DB different
- * from DB0, C_ERR is returned.
- *
- * The function also uses the logging facility in order to warn the user
- * about desynchronizations between the data we have in memory and the
- * cluster configuration. */
+ * 如果发生情况1可以尝试修复并返回C_OK，如果是第二种数据不一致的情况，则返回C_ERR */
 int verifyClusterConfigWithData(void) {
     int j;
     int update_config = 0;
@@ -3631,11 +3605,10 @@ int verifyClusterConfigWithData(void) {
     if (server.cluster_module_flags & CLUSTER_MODULE_FLAG_NO_REDIRECTION)
         return C_OK;
 
-    /* If this node is a slave, don't perform the check at all as we
-     * completely depend on the replication stream. */
+    /* 如果是slave节点，不执行检测，因为从节点的数据完全依赖主从复制 */
     if (nodeIsSlave(myself)) return C_OK;
 
-    /* Make sure we only have keys in DB0. */
+    /* 保证只有DB0中有数据 */
     for (j = 1; j < server.dbnum; j++) {
         if (dictSize(server.db[j].dict)) return C_ERR;
     }
@@ -3672,11 +3645,10 @@ int verifyClusterConfigWithData(void) {
 }
 
 /* -----------------------------------------------------------------------------
- * SLAVE nodes handling
+ * SLAVE节点处理
  * -------------------------------------------------------------------------- */
 
-/* Set the specified node 'n' as master for this node.
- * If this node is currently a master, it is turned into a slave. */
+/* 将节点n设置为当前节点的master，如果当前节点为master，则将其转换为slave */
 void clusterSetMaster(clusterNode *n) {
     serverAssert(n != myself);
     serverAssert(myself->numslots == 0);
@@ -3715,8 +3687,7 @@ static struct redisNodeFlags redisNodeFlagsTable[] = {
     {CLUSTER_NODE_NOFAILOVER,   "nofailover,"}
 };
 
-/* Concatenate the comma separated list of node flags to the given SDS
- * string 'ci'. */
+/* 为指定的ci连接一个用逗号分隔开的标识 */
 sds representClusterNodeFlags(sds ci, uint16_t flags) {
     size_t orig_len = sdslen(ci);
     int i, size = sizeof(redisNodeFlagsTable)/sizeof(struct redisNodeFlags);
@@ -3730,10 +3701,7 @@ sds representClusterNodeFlags(sds ci, uint16_t flags) {
     return ci;
 }
 
-/* Generate a csv-alike representation of the specified cluster node.
- * See clusterGenNodesDescription() top comment for more information.
- *
- * The function returns the string representation as an SDS string. */
+/* 生成一个节点的CSV样式的信息，返回一个SDS */
 sds clusterGenNodeDescription(clusterNode *node) {
     int j, start;
     sds ci;
@@ -3820,7 +3788,7 @@ sds clusterGenNodesDescription(int filter) {
 }
 
 /* -----------------------------------------------------------------------------
- * CLUSTER command
+ * CLUSTER命令
  * -------------------------------------------------------------------------- */
 
 const char *clusterGetMessageTypeString(int type) {
@@ -3851,6 +3819,7 @@ int getSlotOrReply(client *c, robj *o) {
     return (int) slot;
 }
 
+// 回复client集群中slot的分配信息
 void clusterReplyMultiBulkSlots(client *c) {
     /* Format: 1) 1) start slot
      *            2) end slot
@@ -3868,13 +3837,13 @@ void clusterReplyMultiBulkSlots(client *c) {
 
     dictEntry *de;
     dictIterator *di = dictGetSafeIterator(server.cluster->nodes);
+    // 遍历所有node
     while((de = dictNext(di)) != NULL) {
         clusterNode *node = dictGetVal(de);
         int j = 0, start = -1;
         int i, nested_elements = 0;
 
-        /* Skip slaves (that are iterated when producing the output of their
-         * master) and  masters not serving any slot. */
+        /* 跳过slave和没有负责slot的master */
         if (!nodeIsMaster(node) || node->numslots == 0) continue;
 
         for(i = 0; i < node->numslaves; i++) {
@@ -3929,6 +3898,7 @@ void clusterReplyMultiBulkSlots(client *c) {
 }
 
 void clusterCommand(client *c) {
+    // 集群模式未启动
     if (server.cluster_enabled == 0) {
         addReplyError(c,"This instance has cluster support disabled");
         return;
@@ -4541,37 +4511,34 @@ void createDumpPayload(rio *payload, robj *o, robj *key) {
     payload->io.buffer.ptr = sdscatlen(payload->io.buffer.ptr,&crc,8);
 }
 
-/* Verify that the RDB version of the dump payload matches the one of this Redis
- * instance and that the checksum is ok.
- * If the DUMP payload looks valid C_OK is returned, otherwise C_ERR
- * is returned. */
+/* 验证dump的RDB版本和其中一个redis实例吻合并且checksum正常
+ * 如果DUMP文件看起来正常则返回C_OK,否则返回C_ERR */
 int verifyDumpPayload(unsigned char *p, size_t len) {
     unsigned char *footer;
     uint16_t rdbver;
     uint64_t crc;
 
-    /* At least 2 bytes of RDB version and 8 of CRC64 should be present. */
+    /* 至少包含2字节的RDB版本信息和8位的CRC64 */
     if (len < 10) return C_ERR;
     footer = p+(len-10);
 
-    /* Verify RDB version */
+    /* 验证RDB版本 */
     rdbver = (footer[1] << 8) | footer[0];
     if (rdbver > RDB_VERSION) return C_ERR;
 
-    /* Verify CRC64 */
+    /* 验证CRC64 */
     crc = crc64(0,p,len-8);
     memrev64ifbe(&crc);
     return (memcmp(&crc,footer+2,8) == 0) ? C_OK : C_ERR;
 }
 
 /* DUMP keyname
- * DUMP is actually not used by Redis Cluster but it is the obvious
- * complement of RESTORE and can be useful for different applications. */
+ * DUMP命令实际上并没有被Redis集群使用，但明显却是RESTORE命令的完善，可以用于不同的应用 */
 void dumpCommand(client *c) {
     robj *o;
     rio payload;
 
-    /* Check if the key is here. */
+    /* 检查key是否存在我们这里 */
     if ((o = lookupKeyRead(c->db,c->argv[1])) == NULL) {
         addReplyNull(c);
         return;
@@ -4580,12 +4547,12 @@ void dumpCommand(client *c) {
     /* Create the DUMP encoded representation. */
     createDumpPayload(&payload,o,c->argv[1]);
 
-    /* Transfer to the client */
+    /* 传输到客户端 */
     addReplyBulkSds(c,payload.io.buffer.ptr);
     return;
 }
 
-/* RESTORE key ttl serialized-value [REPLACE] */
+/* RESTORE 命令的实现，实现对一个序列进行反序列化 */
 void restoreCommand(client *c) {
     long long ttl, lfu_freq = -1, lru_idle = -1, lru_clock = -1;
     rio payload;
@@ -4787,7 +4754,8 @@ void migrateCloseTimedoutSockets(void) {
  * On in the multiple keys form:
  *
  * MIGRATE host port "" dbid timeout [COPY | REPLACE | AUTH password |
- *         AUTH2 username password] KEYS key1 key2 ... keyN */
+ *         AUTH2 username password] KEYS key1 key2 ... keyN 
+ * MIGRATE 命令实现 */
 void migrateCommand(client *c) {
     migrateCachedSocket *cs;
     int copy = 0, replace = 0, j;
@@ -4856,7 +4824,8 @@ void migrateCommand(client *c) {
      * otherwise if all the keys are missing reply with "NOKEY" to signal
      * the caller there was nothing to migrate. We don't return an error in
      * this case, since often this is due to a normal condition like the key
-     * expiring in the meantime. */
+     * expiring in the meantime. 
+     * 检查key是否存在，至少有一个key要迁移，否则如果所有的key都不存在，回复一个"NOKEY"通知调用者，没有要迁移的key */
     ov = zrealloc(ov,sizeof(robj*)*num_keys);
     kv = zrealloc(kv,sizeof(robj*)*num_keys);
     int oi = 0;
@@ -5126,13 +5095,14 @@ socket_err:
 }
 
 /* -----------------------------------------------------------------------------
- * Cluster functions related to serving / redirecting clients
+ * 集群中服务和重定向客户端相关的函数
  * -------------------------------------------------------------------------- */
 
 /* The ASKING command is required after a -ASK redirection.
  * The client should issue ASKING before to actually send the command to
  * the target instance. See the Redis Cluster specification for more
- * information. */
+ * information. 
+ * 客户端接到-ASK重定向后，需要发送ASKING命令*/
 void askingCommand(client *c) {
     if (server.cluster_enabled == 0) {
         addReplyError(c,"This instance has cluster support disabled");
@@ -5142,7 +5112,7 @@ void askingCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-/* The READONLY command is used by clients to enter the read-only mode.
+/* READONLY命令实现，使客户端进入只读模式
  * In this mode slaves will not redirect clients as long as clients access
  * with read-only commands to keys that are served by the slave's master. */
 void readonlyCommand(client *c) {
@@ -5154,44 +5124,27 @@ void readonlyCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-/* The READWRITE command just clears the READONLY command state. */
+/* READWRITE命令实现，用来清空READONLY命令状态 */
 void readwriteCommand(client *c) {
     c->flags &= ~CLIENT_READONLY;
     addReply(c,shared.ok);
 }
 
-/* Return the pointer to the cluster node that is able to serve the command.
- * For the function to succeed the command should only target either:
+/* 返回一个能够执行该命令的集群节点的指针，该函数能够成功执行命令的条件：
  *
- * 1) A single key (even multiple times like LPOPRPUSH mylist mylist).
- * 2) Multiple keys in the same hash slot, while the slot is stable (no
- *    resharding in progress).
+ * 1) 一个单独的key (甚至向LPOPRPUSH mylist mylist这样多次出现）
+ * 2) 在一个hash槽中的多个key，而且slot不是在rehash状态
  *
- * On success the function returns the node that is able to serve the request.
- * If the node is not 'myself' a redirection must be perfomed. The kind of
- * redirection is specified setting the integer passed by reference
- * 'error_code', which will be set to CLUSTER_REDIR_ASK or
- * CLUSTER_REDIR_MOVED.
+ * 函数执行成功的话返回能够执行该请求的节点，如果这个节点不是自身的话，必须要执行重定向，
+ * error_code会被标记为CLUSTER_REDIR_ASK或者CLUSTER_REDIR_MOVED
+ * 
+ * 如果返回的节点是自身的话，error_code会被设置为CLUSTER_REDIR_NONE
  *
- * When the node is 'myself' 'error_code' is set to CLUSTER_REDIR_NONE.
- *
- * If the command fails NULL is returned, and the reason of the failure is
- * provided via 'error_code', which will be set to:
- *
- * CLUSTER_REDIR_CROSS_SLOT if the request contains multiple keys that
- * don't belong to the same hash slot.
- *
- * CLUSTER_REDIR_UNSTABLE if the request contains multiple keys
- * belonging to the same slot, but the slot is not stable (in migration or
- * importing state, likely because a resharding is in progress).
- *
- * CLUSTER_REDIR_DOWN_UNBOUND if the request addresses a slot which is
- * not bound to any node. In this case the cluster global state should be
- * already "down" but it is fragile to rely on the update of the global state,
- * so we also handle it here.
- *
- * CLUSTER_REDIR_DOWN_STATE and CLUSTER_REDIR_DOWN_RO_STATE if the cluster is
- * down but the user attempts to execute a command that addresses one or more keys. */
+ * 如果命令执行失败的话会返回NULL，error_code会被设置为：
+ * CLUSTER_REDIR_CROSS_SLOT：如果请求中的多个key不属于同一个slot
+ * CLUSTER_REDIR_UNSTABLE：多个key属于同一个slot，但是正在执行rehash操作
+ * CLUSTER_REDIR_DOWN_UNBOUND：如果请求的slot并没有指派给任何节点，这种情况下集群应该已经DOWN掉了
+ * CLUSTER_REDIR_DOWN_STATE和CLUSTER_REDIR_DOWN_RO_STATE：集群已经DOWN掉，但是尝试执行一个定位一个或多个key的命令 */
 clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, int argc, int *hashslot, int *error_code) {
     clusterNode *n = NULL;
     robj *firstkey = NULL;
@@ -5211,8 +5164,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
      * when writing a module that implements a completely different
      * distributed system. */
 
-    /* We handle all the cases as if they were EXEC commands, so we have
-     * a common code path for everything */
+    /* 如果是EXEC命令，处理所有请求 */
     if (cmd->proc == execCommand) {
         /* If CLIENT_MULTI flag is not set EXEC is just going to return an
          * error. */
@@ -5230,8 +5182,7 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
         mc.cmd = cmd;
     }
 
-    /* Check that all the keys are in the same hash slot, and obtain this
-     * slot and the node associated. */
+    /* 检查所有的key是否在同一个slot中，获取slot和对应的node */
     for (i = 0; i < ms->count; i++) {
         struct redisCommand *mcmd;
         robj **margv;
@@ -5387,7 +5338,8 @@ clusterNode *getNodeByQuery(client *c, struct redisCommand *cmd, robj **argv, in
  * If CLUSTER_REDIR_ASK or CLUSTER_REDIR_MOVED error codes
  * are used, then the node 'n' should not be NULL, but should be the
  * node we want to mention in the redirection. Moreover hashslot should
- * be set to the hash slot that caused the redirection. */
+ * be set to the hash slot that caused the redirection. 
+ * 发送client一个正确的重定向标识 */
 void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_code) {
     if (error_code == CLUSTER_REDIR_CROSS_SLOT) {
         addReplySds(c,sdsnew("-CROSSSLOT Keys in request don't hash to the same slot\r\n"));
@@ -5414,17 +5366,13 @@ void clusterRedirectClient(client *c, clusterNode *n, int hashslot, int error_co
     }
 }
 
-/* This function is called by the function processing clients incrementally
- * to detect timeouts, in order to handle the following case:
+/* 此函数由处理客户端的函数以增量方式调用以检测超时，以便处理以下情况：
  *
- * 1) A client blocks with BLPOP or similar blocking operation.
- * 2) The master migrates the hash slot elsewhere or turns into a slave.
- * 3) The client may remain blocked forever (or up to the max timeout time)
- *    waiting for a key change that will never happen.
+ * 1) 一个客户端被BLPOP或者类似的命令阻塞
+ * 2) 一个master节点把slot迁移到别处从而转换成slave
+ * 3) 客户端可能会因为一个从来不会改变的key一直阻塞（或者到达超时时间）
  *
- * If the client is found to be blocked into an hash slot this node no
- * longer handles, the client is sent a redirection error, and the function
- * returns 1. Otherwise 0 is returned and no operation is performed. */
+ * 如果一个客户端被当前节点不在负责的slot阻塞，会向客户端发送一个重定向错误，然后函数返回1，否则返回0，不做任何操作 */
 int clusterRedirectBlockedClientIfNeeded(client *c) {
     if (c->flags & CLIENT_BLOCKED &&
         (c->btype == BLOCKED_LIST ||
@@ -5434,25 +5382,23 @@ int clusterRedirectBlockedClientIfNeeded(client *c) {
         dictEntry *de;
         dictIterator *di;
 
-        /* If the cluster is down, unblock the client with the right error.
-         * If the cluster is configured to allow reads on cluster down, we
-         * still want to emit this error since a write will be required
-         * to unblock them which may never come.  */
+        /* 如果集群状态为Down，使用相应的错误代码解除阻塞
+         * 如果集群配置为允许在down的情况下允许读操作，任然发送错误代码 */
         if (server.cluster->state == CLUSTER_FAIL) {
             clusterRedirectClient(c,NULL,0,CLUSTER_REDIR_DOWN_STATE);
             return 1;
         }
 
-        /* All keys must belong to the same slot, so check first key only. */
+        /* 所有的key一定属于同一个slot，所以只需要检查第一个key */
         di = dictGetIterator(c->bpop.keys);
         if ((de = dictNext(di)) != NULL) {
             robj *key = dictGetKey(de);
             int slot = keyHashSlot((char*)key->ptr, sdslen(key->ptr));
             clusterNode *node = server.cluster->slots[slot];
 
-            /* We send an error and unblock the client if:
-             * 1) The slot is unassigned, emitting a cluster down error.
-             * 2) The slot is not handled by this node, nor being imported. */
+            /* 如果出现以下情况，我们发送一个错误信息，并且解除客户端的阻塞状态：
+             * 1) slot没有指派，发送cluster dow错误
+             * 2) 该slot没有指派给当前节点，并且没有正在被导入 */
             if (node != myself &&
                 server.cluster->importing_slots_from[slot] == NULL)
             {
