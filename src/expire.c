@@ -1,35 +1,3 @@
-/* Implementation of EXPIRE (keys with fixed time to live).
- *
- * ----------------------------------------------------------------------------
- *
- * Copyright (c) 2009-2016, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 
 /*-----------------------------------------------------------------------------
@@ -40,17 +8,13 @@
  * if no access is performed on them.
  *----------------------------------------------------------------------------*/
 
-/* Helper function for the activeExpireCycle() function.
+/* activeExpireCycle()函数的helper函数
  * This function will try to expire the key that is stored in the hash table
  * entry 'de' of the 'expires' hash table of a Redis database.
- *
- * If the key is found to be expired, it is removed from the database and
- * 1 is returned. Otherwise no operation is performed and 0 is returned.
- *
- * When a key is expired, server.stat_expiredkeys is incremented.
- *
- * The parameter 'now' is the current time in milliseconds as is passed
- * to the function to avoid too many gettimeofday() syscalls. */
+ * 
+ * 如果找到过期的key，那么将其从db中删除并返回1，否则不做任何操作并返回0
+ * 如果一个key过期了，server.stat_expiredkeys增加
+ * 参数‘now’代表当前的毫秒时间，传递该参数是为了防止太多的gettimeofday()系统调用 */
 int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
     long long t = dictGetSignedIntegerVal(de);
     if (now > t) {
@@ -135,60 +99,52 @@ void activeExpireCycle(int type) {
     config_cycle_acceptable_stale = ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE-
                                     effort;
 
-    /* This function has some global state in order to continue the work
-     * incrementally across calls. */
+    /* 定义全局参数. */
     static unsigned int current_db = 0; /* Last DB tested. */
     static int timelimit_exit = 0;      /* Time limit hit in previous call? */
     static long long last_fast_cycle = 0; /* When last fast cycle ran. */
 
     int j, iteration = 0;
-    int dbs_per_call = CRON_DBS_PER_CALL;
+    int dbs_per_call = CRON_DBS_PER_CALL; // 默认值为16
     long long start = ustime(), timelimit, elapsed;
 
     /* When clients are paused the dataset should be static not just from the
      * POV of clients not being able to write, but also from the POV of
      * expires and evictions of keys not being performed. */
     if (clientsArePaused()) return;
-
+    // 快速模式
     if (type == ACTIVE_EXPIRE_CYCLE_FAST) {
         /* Don't start a fast cycle if the previous cycle did not exit
          * for time limit, unless the percentage of estimated stale keys is
          * too high. Also never repeat a fast cycle for the same period
-         * as the fast cycle total duration itself. */
+         * as the fast cycle total duration itself. 
+         * 如果上一个周期没有激活时间限制，不要开始快速循环。不要在与快速循环总持续时间本身相同的时间段内重复快速循环 */
         if (!timelimit_exit &&
             server.stat_expired_stale_perc < config_cycle_acceptable_stale)
             return;
-
+        // 快速模式相隔的时间太短
         if (start < last_fast_cycle + (long long)config_cycle_fast_duration*2)
             return;
 
         last_fast_cycle = start;
     }
 
-    /* We usually should test CRON_DBS_PER_CALL per iteration, with
-     * two exceptions:
-     *
-     * 1) Don't test more DBs than we have.
-     * 2) If last time we hit the time limit, we want to scan all DBs
-     * in this iteration, as there is work to do in some DB and we don't want
-     * expired keys to use memory for too much time. */
+    /* 通常情况我们每次迭代测试16个数据库，有两个例外：
+     *      1. 数据库数量小于16个
+     *      2. 如果上一次触发了时间限制，那么这次会扫描所有的数据库，避免过期键占用空间
+     * 
+     * 更新测试的数据库数量*/
     if (dbs_per_call > server.dbnum || timelimit_exit)
         dbs_per_call = server.dbnum;
 
-    /* We can use at max 'config_cycle_slow_time_perc' percentage of CPU
-     * time per iteration. Since this function gets called with a frequency of
-     * server.hz times per second, the following is the max amount of
-     * microseconds we can spend in this function. */
+    /* 计算时间限制25ms */
     timelimit = config_cycle_slow_time_perc*1000000/server.hz/100;
     timelimit_exit = 0;
     if (timelimit <= 0) timelimit = 1;
-
+    // 快速模式，更新时间限制
     if (type == ACTIVE_EXPIRE_CYCLE_FAST)
         timelimit = config_cycle_fast_duration; /* in microseconds. */
 
-    /* Accumulate some global stats as we expire keys, to have some idea
-     * about the number of keys that are already logically expired, but still
-     * existing inside the database. */
     long total_sampled = 0;
     long total_expired = 0;
 
@@ -198,9 +154,7 @@ void activeExpireCycle(int type) {
 
         redisDb *db = server.db+(current_db % server.dbnum);
 
-        /* Increment the DB now so we are sure if we run out of time
-         * in the current DB we'll restart from the next. This allows to
-         * distribute the time evenly across DBs. */
+        /* 当前数据库标记加1，下次进入循环直接从当前数据库开始处理 */
         current_db++;
 
         /* Continue to expire if at the end of the cycle there are still
@@ -213,7 +167,7 @@ void activeExpireCycle(int type) {
             int ttl_samples;
             iteration++;
 
-            /* If there is nothing to expire try next DB ASAP. */
+            /* 当前db不存在设置了过期时间的key，则跳过 */
             if ((num = dictSize(db->expires)) == 0) {
                 db->avg_ttl = 0;
                 break;
@@ -423,8 +377,7 @@ void expireSlaveKeys(void) {
     }
 }
 
-/* Track keys that received an EXPIRE or similar command in the context
- * of a writable slave. */
+/* 跟踪可写slave节点接受到的EXPIRE或者类似的命令 */
 void rememberSlaveKeyWithExpire(redisDb *db, robj *key) {
     if (slaveKeysWithExpire == NULL) {
         static dictType dt = {
@@ -476,7 +429,7 @@ void flushSlaveKeysWithExpireList(void) {
 }
 
 /*-----------------------------------------------------------------------------
- * Expires Commands
+ * Expires 命令
  *----------------------------------------------------------------------------*/
 
 /* This is the generic command implementation for EXPIRE, PEXPIRE, EXPIREAT
@@ -488,7 +441,7 @@ void flushSlaveKeysWithExpireList(void) {
  * the argv[2] parameter. The basetime is always specified in milliseconds. */
 void expireGenericCommand(client *c, long long basetime, int unit) {
     robj *key = c->argv[1], *param = c->argv[2];
-    long long when; /* unix time in milliseconds when the key will expire. */
+    long long when; /* 过期时间的毫秒时间戳 */
 
     if (getLongLongFromObjectOrReply(c, param, &when, NULL) != C_OK)
         return;
@@ -496,7 +449,7 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
     if (unit == UNIT_SECONDS) when *= 1000;
     when += basetime;
 
-    /* No key, return zero. */
+    /* 没有找到对应的key. */
     if (lookupKeyWrite(c->db,key) == NULL) {
         addReply(c,shared.czero);
         return;

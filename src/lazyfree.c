@@ -101,9 +101,7 @@ void freeObjAsync(robj *o) {
     }
 }
 
-/* Empty a Redis DB asynchronously. What the function does actually is to
- * create a new empty set of hash tables and scheduling the old ones for
- * lazy freeing. */
+/* 异步清空一个db，实际上是创建2个新的哈希表，一个是主表，一个是过期表，旧的2个表会异步释放 */
 void emptyDbAsync(redisDb *db) {
     dict *oldht1 = db->dict, *oldht2 = db->expires;
     db->dict = dictCreate(&dbDictType,NULL);
@@ -112,8 +110,7 @@ void emptyDbAsync(redisDb *db) {
     bioCreateBackgroundJob(BIO_LAZY_FREE,NULL,oldht1,oldht2);
 }
 
-/* Empty the slots-keys map of Redis CLuster by creating a new empty one
- * and scheduiling the old for lazy freeing. */
+/* 异步情况slot-keys map，实际上是先创建新的再异步释放老的 */
 void slotToKeyFlushAsync(void) {
     rax *old = server.cluster->slots_to_keys;
 

@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "cluster.h"
 #include "atomicvar.h"
@@ -40,7 +11,9 @@
 
 int keyIsExpired(redisDb *db, robj *key);
 
-/* Update LFU when an object is accessed.
+/* 当对象被访问时更新LFU
+ * 首先，如果达到递减时间，则递减计数器。
+ * 然后对数递增计数器，并更新访问时间。
  * Firstly, decrement the counter if the decrement time is reached.
  * Then logarithmically increment the counter, and update the access time. */
 void updateLFU(robj *val) {
@@ -49,17 +22,15 @@ void updateLFU(robj *val) {
     val->lru = (LFUGetTimeInMinutes()<<8) | counter;
 }
 
-/* Low level key lookup API, not actually called directly from commands
- * implementations that should instead rely on lookupKeyRead(),
- * lookupKeyWrite() and lookupKeyReadWithFlags(). */
+/* 低级key查找API，实际上不是直接从命令实现中调用的，
+ * 这些命令实现应该依赖于lookupKeyRead()、lookupKeyWrite()和lookupKeyReadWithFlags()函数。*/
 robj *lookupKey(redisDb *db, robj *key, int flags) {
     dictEntry *de = dictFind(db->dict,key->ptr);
     if (de) {
+        // 找到对应的key，或者其对应的值
         robj *val = dictGetVal(de);
 
-        /* Update the access time for the ageing algorithm.
-         * Don't do it if we have a saving child, as this will trigger
-         * a copy on write madness. */
+        /* 如果启动了LFU的maxmemory的策略，更新key的使用时间，如果有正在执行rdbsave或者aof等操作则不执行 */
         if (!hasActiveChildProcess() && !(flags & LOOKUP_NOTOUCH)){
             if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
                 updateLFU(val);
@@ -73,14 +44,12 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
     }
 }
 
-/* Lookup a key for read operations, or return NULL if the key is not found
- * in the specified DB.
- *
- * As a side effect of calling this function:
- * 1. A key gets expired if it reached it's TTL.
- * 2. The key last access time is updated.
- * 3. The global keys hits/misses stats are updated (reported in INFO).
- * 4. If keyspace notifications are enabled, a "keymiss" notification is fired.
+/* 以读操作在指定的db中查找key，如果没找到则返回NULL
+ * 调用该函数相应的副作用：
+ * 1. 如果该key的TTL到了，则会过期
+ * 2. key的最后访问时间会被更新
+ * 3. 全局的hits/misses数据会被更新
+ * 4. 如果key空间的通知被启用, "keymiss"通知会被触发
  *
  * This API should not be used when we write to the key after obtaining
  * the object linked to the key, but only for read only operations.
@@ -90,36 +59,19 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
  *  LOOKUP_NONE (or zero): no special flags are passed.
  *  LOOKUP_NOTOUCH: don't alter the last access time of the key.
  *
- * Note: this function also returns NULL if the key is logically expired
- * but still existing, in case this is a slave, since this API is called only
- * for read operations. Even if the key expiry is master-driven, we can
- * correctly report a key is expired on slaves even if the master is lagging
- * expiring our key via DELs in the replication link. */
+ * 注意: 如果key已经过期但还存在，仍然返回NULL */
 robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags) {
     robj *val;
 
     if (expireIfNeeded(db,key) == 1) {
-        /* Key expired. If we are in the context of a master, expireIfNeeded()
-         * returns 0 only when the key does not exist at all, so it's safe
-         * to return NULL ASAP. */
+        /* 如果是主节点，则key会被删除 */
         if (server.masterhost == NULL) {
             server.stat_keyspace_misses++;
             notifyKeyspaceEvent(NOTIFY_KEY_MISS, "keymiss", key, db->id);
             return NULL;
         }
 
-        /* However if we are in the context of a slave, expireIfNeeded() will
-         * not really try to expire the key, it only returns information
-         * about the "logical" status of the key: key expiring is up to the
-         * master in order to have a consistent view of master's data set.
-         *
-         * However, if the command caller is not the master, and as additional
-         * safety measure, the command invoked is a read-only command, we can
-         * safely return NULL here, and provide a more consistent behavior
-         * to clients accessign expired values in a read-only fashion, that
-         * will say the key as non existing.
-         *
-         * Notably this covers GETs when slaves are used to scale reads. */
+        // 如果我们在从节点环境， expireIfNeeded()函数不会删除过期的键，它返回的仅仅是键是否被删除的逻辑值
         if (server.current_client &&
             server.current_client != server.master &&
             server.current_client->cmd &&
@@ -140,8 +92,6 @@ robj *lookupKeyReadWithFlags(redisDb *db, robj *key, int flags) {
     return val;
 }
 
-/* Like lookupKeyReadWithFlags(), but does not use any flag, which is the
- * common case. */
 robj *lookupKeyRead(redisDb *db, robj *key) {
     return lookupKeyReadWithFlags(db,key,LOOKUP_NONE);
 }
@@ -169,33 +119,23 @@ robj *lookupKeyWriteOrReply(client *c, robj *key, robj *reply) {
     return o;
 }
 
-/* Add the key to the DB. It's up to the caller to increment the reference
- * counter of the value if needed.
+/* 向db中增加key，由函数的调用者增加值的引用计数
  *
  * The program is aborted if the key already exists. */
 void dbAdd(redisDb *db, robj *key, robj *val) {
     sds copy = sdsdup(key->ptr);
-    int retval = dictAdd(db->dict, copy, val);
+    int retval = dictAdd(db->dict, copy, val); // 将key-val添加到db的字典中
 
     serverAssertWithInfo(NULL,key,retval == DICT_OK);
     if (val->type == OBJ_LIST ||
         val->type == OBJ_ZSET ||
         val->type == OBJ_STREAM)
         signalKeyAsReady(db, key);
+    // 如果开启了集群模式，将key添加到对应的slot中
     if (server.cluster_enabled) slotToKeyAdd(key->ptr);
 }
 
-/* This is a special version of dbAdd() that is used only when loading
- * keys from the RDB file: the key is passed as an SDS string that is
- * retained by the function (and not freed by the caller).
- *
- * Moreover this function will not abort if the key is already busy, to
- * give more control to the caller, nor will signal the key as ready
- * since it is not useful in this context.
- *
- * The function returns 1 if the key was added to the database, taking
- * ownership of the SDS string, otherwise 0 is returned, and is up to the
- * caller to free the SDS string. */
+/* dbAdd()函数特殊的版本，仅仅在从RDB文件加载数据时使用 */
 int dbAddRDBLoad(redisDb *db, sds key, robj *val) {
     int retval = dictAdd(db->dict, key, val);
     if (retval != DICT_OK) return 0;
@@ -203,11 +143,7 @@ int dbAddRDBLoad(redisDb *db, sds key, robj *val) {
     return 1;
 }
 
-/* Overwrite an existing key with a new value. Incrementing the reference
- * count of the new value is up to the caller.
- * This function does not modify the expire time of the existing key.
- *
- * The program is aborted if the key was not already present. */
+/* 覆盖一个已经存在的key的值，该函数不会修改已经存在的key的过期时间，如果key不存在，则终止 */
 void dbOverwrite(redisDb *db, robj *key, robj *val) {
     dictEntry *de = dictFind(db->dict,key->ptr);
 
@@ -227,17 +163,11 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
     dictFreeVal(db->dict, &auxentry);
 }
 
-/* High level Set operation. This function can be used in order to set
- * a key, whatever it was existing or not, to a new object.
+/* 高级别的set操作，该函数用于set一个key，不管key是否存在
  *
- * 1) The ref count of the value object is incremented.
- * 2) clients WATCHing for the destination key notified.
- * 3) The expire time of the key is reset (the key is made persistent),
- *    unless 'keepttl' is true.
- *
- * All the new keys in the database should be created via this interface.
- * The client 'c' argument may be set to NULL if the operation is performed
- * in a context where there is no clear client performing the operation. */
+ * 1) 引用计数增加
+ * 2) watcher被通知
+ * 3) 过期时间被重置，除非keepttl参数设置为true */
 void genericSetKey(client *c, redisDb *db, robj *key, robj *val, int keepttl, int signal) {
     if (lookupKeyWrite(db,key) == NULL) {
         dbAdd(db,key,val);
@@ -245,25 +175,24 @@ void genericSetKey(client *c, redisDb *db, robj *key, robj *val, int keepttl, in
         dbOverwrite(db,key,val);
     }
     incrRefCount(val);
+    // 从过期字典中移除，永不过期
     if (!keepttl) removeExpire(db,key);
     if (signal) signalModifiedKey(c,db,key);
 }
 
-/* Common case for genericSetKey() where the TTL is not retained. */
+/* set key，并去除过期时间 */
 void setKey(client *c, redisDb *db, robj *key, robj *val) {
     genericSetKey(c,db,key,val,0,1);
 }
 
-/* Return true if the specified key exists in the specified database.
- * LRU/LFU info is not updated in any way. */
+/* 返回某个key是否存在某个db中，LRU/LFU信息不更新. */
 int dbExists(redisDb *db, robj *key) {
     return dictFind(db->dict,key->ptr) != NULL;
 }
 
-/* Return a random key, in form of a Redis object.
- * If there are no keys, NULL is returned.
+/* 返回一个随机的key，如果没有key则返回NULL
  *
- * The function makes sure to return keys not already expired. */
+ * 该函数保证返回的不是过期的key */
 robj *dbRandomKey(redisDb *db) {
     dictEntry *de;
     int maxtries = 100;
@@ -280,30 +209,24 @@ robj *dbRandomKey(redisDb *db) {
         keyobj = createStringObject(key,sdslen(key));
         if (dictFind(db->expires,key)) {
             if (allvolatile && server.masterhost && --maxtries == 0) {
-                /* If the DB is composed only of keys with an expire set,
-                 * it could happen that all the keys are already logically
-                 * expired in the slave, so the function cannot stop because
-                 * expireIfNeeded() is false, nor it can stop because
-                 * dictGetRandomKey() returns NULL (there are keys to return).
-                 * To prevent the infinite loop we do some tries, but if there
-                 * are the conditions for an infinite loop, eventually we
-                 * return a key name that may be already expired. */
+                /* 如果这个key在过期字典中，检查key是否过期，
+                 * 如果过期且被删除，则释放该key对象，并且重新随机返回一个key */
                 return keyobj;
             }
             if (expireIfNeeded(db,keyobj)) {
                 decrRefCount(keyobj);
-                continue; /* search for another key. This expired. */
+                continue; /* key已经过期，寻找下一个key */
             }
         }
         return keyobj;
     }
 }
 
-/* Delete a key, value, and associated expiration entry if any, from the DB */
+/* 删除一个键值对以及键的过期时间，返回1表示删除成功 */
 int dbSyncDelete(redisDb *db, robj *key) {
-    /* Deleting an entry from the expires dict will not free the sds of
-     * the key, because it is shared with the main dictionary. */
+    /* 键值对从过期字典中删除 */
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
+    // 从主字典中删除
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
         if (server.cluster_enabled) slotToKeyDel(key->ptr);
         return 1;
@@ -312,8 +235,7 @@ int dbSyncDelete(redisDb *db, robj *key) {
     }
 }
 
-/* This is a wrapper whose behavior depends on the Redis lazy free
- * configuration. Deletes the key synchronously or asynchronously. */
+/* 根据lazyfree的配置情况选择是异步删除还是同步删除 */
 int dbDelete(redisDb *db, robj *key) {
     return server.lazyfree_lazy_server_del ? dbAsyncDelete(db,key) :
                                              dbSyncDelete(db,key);
@@ -345,7 +267,7 @@ int dbDelete(redisDb *db, robj *key) {
  *
  * At this point the caller is ready to modify the object, for example
  * using an sdscat() call to append some data, or anything else.
- */
+ * 解除key的值对象的共享，用于修改key的值 */
 robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o) {
     serverAssert(o->type == OBJ_STRING);
     if (o->refcount != 1 || o->encoding != OBJ_ENCODING_RAW) {
@@ -357,29 +279,21 @@ robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o) {
     return o;
 }
 
-/* Remove all keys from all the databases in a Redis server.
- * If callback is given the function is called from time to time to
- * signal that work is in progress.
+/* 清空redis db中的key
  *
- * The dbnum can be -1 if all the DBs should be flushed, or the specified
- * DB number if we want to flush only a single Redis database number.
+ * 如果dbnum参数为-1，则清空所有db的key，或者清空指定db中的key
  *
  * Flags are be EMPTYDB_NO_FLAGS if no special flags are specified or
- * 1. EMPTYDB_ASYNC if we want the memory to be freed in a different thread.
- * 2. EMPTYDB_BACKUP if we want to empty the backup dictionaries created by
- *    disklessLoadMakeBackups. In that case we only free memory and avoid
- *    firing module events.
- * and the function to return ASAP.
+ * 1. EMPTYDB_ASYNC 如果想在另一个线程中清内存
+ * 2. EMPTYDB_BACKUP 如果只想清空由disklessLoadMakeBackups生成的备份字典
  *
- * On success the fuction returns the number of keys removed from the
- * database(s). Otherwise -1 is returned in the specific case the
- * DB number is out of range, and errno is set to EINVAL. */
+ * 执行成功的情况下，返回清空的key的数量，如果dbnum不存在则返回-1，errno被设置为EINVAL */
 long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(void*)) {
     int async = (flags & EMPTYDB_ASYNC);
-    int backup = (flags & EMPTYDB_BACKUP); /* Just free the memory, nothing else */
+    int backup = (flags & EMPTYDB_BACKUP); /* 只清空内存，不做其他事 */
     RedisModuleFlushInfoV1 fi = {REDISMODULE_FLUSHINFO_VERSION,!async,dbnum};
     long long removed = 0;
-
+    // dbnum索引越界
     if (dbnum < -1 || dbnum >= server.dbnum) {
         errno = EINVAL;
         return -1;
@@ -391,14 +305,11 @@ long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(
         moduleFireServerEvent(REDISMODULE_EVENT_FLUSHDB,
                               REDISMODULE_SUBEVENT_FLUSHDB_START,
                               &fi);
-
-        /* Make sure the WATCHed keys are affected by the FLUSH* commands.
-         * Note that we need to call the function while the keys are still
-         * there. */
         signalFlushedDb(dbnum);
     }
 
     int startdb, enddb;
+    // 是否为flushall
     if (dbnum == -1) {
         startdb = 0;
         enddb = server.dbnum-1;
@@ -407,10 +318,13 @@ long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(
     }
 
     for (int j = startdb; j <= enddb; j++) {
+        // 计算清空的key的数量
         removed += dictSize(dbarray[j].dict);
         if (async) {
+            // 异步清空db，实际上的创建新的字典，异步释放老字典
             emptyDbAsync(&dbarray[j]);
         } else {
+            // 同步删除
             dictEmpty(dbarray[j].dict,callback);
             dictEmpty(dbarray[j].expires,callback);
         }
@@ -420,8 +334,10 @@ long long emptyDbGeneric(redisDb *dbarray, int dbnum, int flags, void(callback)(
     if (!backup) {
         if (server.cluster_enabled) {
             if (async) {
+                // 异步
                 slotToKeyFlushAsync();
             } else {
+                // 同步
                 slotToKeyFlush();
             }
         }
@@ -441,13 +357,16 @@ long long emptyDb(int dbnum, int flags, void(callback)(void*)) {
     return emptyDbGeneric(server.db, dbnum, flags, callback);
 }
 
+// 切换数据库
 int selectDb(client *c, int id) {
+    // 索引越界
     if (id < 0 || id >= server.dbnum)
         return C_ERR;
     c->db = &server.db[id];
     return C_OK;
 }
 
+// 返回所有db中的key的数量总和
 long long dbTotalServerKeyCount() {
     long long total = 0;
     int j;
@@ -475,6 +394,7 @@ void signalModifiedKey(client *c, redisDb *db, robj *key) {
     trackingInvalidateKey(c,key);
 }
 
+// 清空db通知函数
 void signalFlushedDb(int dbid) {
     touchWatchedKeysOnFlush(dbid);
     trackingInvalidateKeysOnFlush(dbid);
@@ -484,17 +404,11 @@ void signalFlushedDb(int dbid) {
  * Type agnostic commands operating on the key space
  *----------------------------------------------------------------------------*/
 
-/* Return the set of flags to use for the emptyDb() call for FLUSHALL
- * and FLUSHDB commands.
- *
- * Currently the command just attempts to parse the "ASYNC" option. It
- * also checks if the command arity is wrong.
- *
- * On success C_OK is returned and the flags are stored in *flags, otherwise
- * C_ERR is returned and the function sends an error to the client. */
+/* 解析flush命令的参数 */
 int getFlushCommandFlags(client *c, int *flags) {
     /* Parse the optional ASYNC option. */
     if (c->argc > 1) {
+        // 如果flush命令有参数，那么只能是async
         if (c->argc > 2 || strcasecmp(c->argv[1]->ptr,"async")) {
             addReply(c,shared.syntaxerr);
             return C_ERR;
@@ -506,7 +420,7 @@ int getFlushCommandFlags(client *c, int *flags) {
     return C_OK;
 }
 
-/* Flushes the whole server data set. */
+/* 清空整个服务的数据. */
 void flushAllDataAndResetRDB(int flags) {
     server.dirty += emptyDb(-1,flags,NULL);
     if (server.rdb_child_pid != -1) killRDBChild();
@@ -531,7 +445,7 @@ void flushAllDataAndResetRDB(int flags) {
 
 /* FLUSHDB [ASYNC]
  *
- * Flushes the currently SELECTed Redis DB. */
+ * 清空选择的db的数据 */
 void flushdbCommand(client *c) {
     int flags;
 
@@ -549,7 +463,7 @@ void flushdbCommand(client *c) {
 
 /* FLUSHALL [ASYNC]
  *
- * Flushes the whole server data set. */
+ * 清空所有db的数据 */
 void flushallCommand(client *c) {
     int flags;
     if (getFlushCommandFlags(c,&flags) == C_ERR) return;
@@ -557,7 +471,7 @@ void flushallCommand(client *c) {
     addReply(c,shared.ok);
 }
 
-/* This command implements DEL and LAZYDEL. */
+/* 该命令实现 DEL 和 LAZYDEL. */
 void delGenericCommand(client *c, int lazy) {
     int numdel = 0, j;
 
@@ -580,12 +494,13 @@ void delCommand(client *c) {
     delGenericCommand(c,server.lazyfree_lazy_user_del);
 }
 
+// 异步删除命令
 void unlinkCommand(client *c) {
     delGenericCommand(c,1);
 }
 
 /* EXISTS key1 key2 ... key_N.
- * Return value is the number of keys existing. */
+ * 返回存在的key的数量 */
 void existsCommand(client *c) {
     long long count = 0;
     int j;
@@ -596,6 +511,7 @@ void existsCommand(client *c) {
     addReplyLongLong(c,count);
 }
 
+// SELECT命令
 void selectCommand(client *c) {
     long id;
 
@@ -603,6 +519,7 @@ void selectCommand(client *c) {
         "invalid DB index") != C_OK)
         return;
 
+    // 集群模式下不允许执行SELECT命令
     if (server.cluster_enabled && id != 0) {
         addReplyError(c,"SELECT is not allowed in cluster mode");
         return;
@@ -614,6 +531,7 @@ void selectCommand(client *c) {
     }
 }
 
+// randomkey命令
 void randomkeyCommand(client *c) {
     robj *key;
 
@@ -626,6 +544,7 @@ void randomkeyCommand(client *c) {
     decrRefCount(key);
 }
 
+// keys命令
 void keysCommand(client *c) {
     dictIterator *di;
     dictEntry *de;
@@ -653,8 +572,7 @@ void keysCommand(client *c) {
     setDeferredArrayLen(c,replylen,numkeys);
 }
 
-/* This callback is used by scanGenericCommand in order to collect elements
- * returned by the dictionary iterator into a list. */
+/* scanCallback()函数被scanGenericCommand()函数调用，为了保存被字典迭代器返回到列表中的元素 */
 void scanCallback(void *privdata, const dictEntry *de) {
     void **pd = (void**) privdata;
     list *keys = pd[0];
@@ -687,7 +605,8 @@ void scanCallback(void *privdata, const dictEntry *de) {
 /* Try to parse a SCAN cursor stored at object 'o':
  * if the cursor is valid, store it as unsigned integer into *cursor and
  * returns C_OK. Otherwise return C_ERR and send an error to the
- * client. */
+ * client. 
+ * 获取scan命令的游标，尝试取解析一个保存在o中的游标，如果游标合法，保存到cursor中否则返回C_ER */
 int parseScanCursorOrReply(client *c, robj *o, unsigned long *cursor) {
     char *eptr;
 
@@ -713,7 +632,10 @@ int parseScanCursorOrReply(client *c, robj *o, unsigned long *cursor) {
  * in order to parse options.
  *
  * In the case of a Hash object the function returns both the field and value
- * of every element on the Hash. */
+ * of every element on the Hash. 
+ * o对象必须是哈希对象或集合对象，否则命令将操作当前数据库
+ * 如果o不是NULL，那么说明他是一个哈希或集合对象，函数将跳过这些键对象，对参数进行分析
+ * 如果是哈希对象，返回返回的是键值对 */
 void scanGenericCommand(client *c, robj *o, unsigned long cursor) {
     int i, j;
     list *keys = listCreate();
@@ -887,7 +809,7 @@ void scanGenericCommand(client *c, robj *o, unsigned long cursor) {
     }
 
     /* Step 4: Reply to the client. */
-    addReplyArrayLen(c, 2);
+    addReplyArrayLen(c, 2);Ò
     addReplyBulkLongLong(c,cursor);
 
     addReplyArrayLen(c, listLength(keys));
@@ -903,21 +825,24 @@ cleanup:
     listRelease(keys);
 }
 
-/* The SCAN command completely relies on scanGenericCommand. */
+/* SCAN命令完全依赖于 scanGenericCommand. */
 void scanCommand(client *c) {
     unsigned long cursor;
     if (parseScanCursorOrReply(c,c->argv[1],&cursor) == C_ERR) return;
     scanGenericCommand(c,NULL,cursor);
 }
 
+// DBSIZE命令
 void dbsizeCommand(client *c) {
     addReplyLongLong(c,dictSize(c->db->dict));
 }
 
+// LASTSAVE命令
 void lastsaveCommand(client *c) {
     addReplyLongLong(c,server.lastsave);
 }
 
+// 获取对象的类型名称
 char* getObjectTypeName(robj *o) {
     char* type;
     if (o == NULL) {
@@ -940,24 +865,30 @@ char* getObjectTypeName(robj *o) {
     return type;
 }
 
+// TYPE命令
 void typeCommand(client *c) {
     robj *o;
     o = lookupKeyReadWithFlags(c->db,c->argv[1],LOOKUP_NOTOUCH);
     addReplyStatus(c, getObjectTypeName(o));
 }
 
+// SHUTDOWN命令
 void shutdownCommand(client *c) {
     int flags = 0;
 
     if (c->argc > 2) {
+        // 参数不能超过2个
         addReply(c,shared.syntaxerr);
         return;
     } else if (c->argc == 2) {
+        // SHUTDOWN NOSAVE
         if (!strcasecmp(c->argv[1]->ptr,"nosave")) {
             flags |= SHUTDOWN_NOSAVE;
+        // SHUTDOWN SAVE
         } else if (!strcasecmp(c->argv[1]->ptr,"save")) {
             flags |= SHUTDOWN_SAVE;
         } else {
+            // 只支持SAVE和NOSAVE 2个参数
             addReply(c,shared.syntaxerr);
             return;
         }
@@ -974,18 +905,19 @@ void shutdownCommand(client *c) {
     addReplyError(c,"Errors trying to SHUTDOWN. Check logs.");
 }
 
+// RENAME命令
 void renameGenericCommand(client *c, int nx) {
     robj *o;
     long long expire;
     int samekey = 0;
 
-    /* When source and dest key is the same, no operation is performed,
+    /* 如果源和目标是同一个key，不做任何操作
      * if the key exists, however we still return an error on unexisting key. */
     if (sdscmp(c->argv[1]->ptr,c->argv[2]->ptr) == 0) samekey = 1;
 
     if ((o = lookupKeyWriteOrReply(c,c->argv[1],shared.nokeyerr)) == NULL)
         return;
-
+    // 同一个key
     if (samekey) {
         addReply(c,nx ? shared.czero : shared.ok);
         return;
@@ -999,11 +931,11 @@ void renameGenericCommand(client *c, int nx) {
             addReply(c,shared.czero);
             return;
         }
-        /* Overwrite: delete the old key before creating the new one
-         * with the same name. */
+        /* 创建新的key之前删除老key*/
         dbDelete(c->db,c->argv[2]);
     }
     dbAdd(c->db,c->argv[2],o);
+    // 设置同意的过期时间
     if (expire != -1) setExpire(c,c->db,c->argv[2],expire);
     dbDelete(c->db,c->argv[1]);
     signalModifiedKey(c,c->db,c->argv[1]);
@@ -1016,14 +948,16 @@ void renameGenericCommand(client *c, int nx) {
     addReply(c,nx ? shared.cone : shared.ok);
 }
 
+// RENAME命令
 void renameCommand(client *c) {
     renameGenericCommand(c,0);
 }
-
+// RENAMENX命令，修改成功时，返回1 。 如果key已经存在，返回 0 。
 void renamenxCommand(client *c) {
     renameGenericCommand(c,1);
 }
 
+// MOVE命令，将key从一个db移动到另一个db
 void moveCommand(client *c) {
     robj *o;
     redisDb *src, *dst;
@@ -1035,7 +969,7 @@ void moveCommand(client *c) {
         return;
     }
 
-    /* Obtain source and target DB pointers */
+    /* 获取源和目的DB的指针 */
     src = c->db;
     srcid = c->db->id;
 
@@ -1049,14 +983,13 @@ void moveCommand(client *c) {
     dst = c->db;
     selectDb(c,srcid); /* Back to the source DB */
 
-    /* If the user is moving using as target the same
-     * DB as the source DB it is probably an error. */
+    /* db相同，返回错误 */
     if (src == dst) {
         addReply(c,shared.sameobjecterr);
         return;
     }
 
-    /* Check if the element exists and get a reference */
+    /* 如果key不存在，返回错误 */
     o = lookupKeyWrite(c->db,c->argv[1]);
     if (!o) {
         addReply(c,shared.czero);
@@ -1064,16 +997,17 @@ void moveCommand(client *c) {
     }
     expire = getExpire(c->db,c->argv[1]);
 
-    /* Return zero if the key already exists in the target DB */
+    /* 如果key在目标db中已经存在，返回0 */
     if (lookupKeyWrite(dst,c->argv[1]) != NULL) {
         addReply(c,shared.czero);
         return;
     }
+    // 目标db中添加该key，并设置过期时间
     dbAdd(dst,c->argv[1],o);
     if (expire != -1) setExpire(c,dst,c->argv[1],expire);
     incrRefCount(o);
 
-    /* OK! key moved, free the entry in the source DB */
+    /* key已经移动，从源db中删除 */
     dbDelete(src,c->argv[1]);
     signalModifiedKey(c,src,c->argv[1]);
     signalModifiedKey(c,dst,c->argv[1]);
@@ -1104,14 +1038,7 @@ void scanDatabaseForReadyLists(redisDb *db) {
     dictReleaseIterator(di);
 }
 
-/* Swap two databases at runtime so that all clients will magically see
- * the new database even if already connected. Note that the client
- * structure c->db points to a given DB, so we need to be smarter and
- * swap the underlying referenced structures, otherwise we would need
- * to fix all the references to the Redis DB structure.
- *
- * Returns C_ERR if at least one of the DB ids are out of range, otherwise
- * C_OK is returned. */
+/* 交换DB*/
 int dbSwapDatabases(long id1, long id2) {
     if (id1 < 0 || id1 >= server.dbnum ||
         id2 < 0 || id2 >= server.dbnum) return C_ERR;
@@ -1150,13 +1077,13 @@ int dbSwapDatabases(long id1, long id2) {
 void swapdbCommand(client *c) {
     long id1, id2;
 
-    /* Not allowed in cluster mode: we have just DB 0 there. */
+    /* 集群模式下不允许交换，因为只有db0 */
     if (server.cluster_enabled) {
         addReplyError(c,"SWAPDB is not allowed in cluster mode");
         return;
     }
 
-    /* Get the two DBs indexes. */
+    /* 获取2个db的索引. */
     if (getLongFromObjectOrReply(c, c->argv[1], &id1,
         "invalid first DB index") != C_OK)
         return;
@@ -1165,7 +1092,7 @@ void swapdbCommand(client *c) {
         "invalid second DB index") != C_OK)
         return;
 
-    /* Swap... */
+    /* 交换 */
     if (dbSwapDatabases(id1,id2) == C_ERR) {
         addReplyError(c,"DB index is out of range");
         return;
@@ -1179,17 +1106,13 @@ void swapdbCommand(client *c) {
  * Expires API
  *----------------------------------------------------------------------------*/
 
+// 将key从过期字典中移除，永不过期
 int removeExpire(redisDb *db, robj *key) {
-    /* An expire may only be removed if there is a corresponding entry in the
-     * main dict. Otherwise, the key will never be freed. */
     serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
     return dictDelete(db->expires,key->ptr) == DICT_OK;
 }
 
-/* Set an expire to the specified key. If the expire is set in the context
- * of an user calling a command 'c' is the client, otherwise 'c' is set
- * to NULL. The 'when' parameter is the absolute unix time in milliseconds
- * after which the key will no longer be considered valid. */
+/* 为key设置过期时间 */
 void setExpire(client *c, redisDb *db, robj *key, long long when) {
     dictEntry *kde, *de;
 
@@ -1204,29 +1127,20 @@ void setExpire(client *c, redisDb *db, robj *key, long long when) {
         rememberSlaveKeyWithExpire(db,key);
 }
 
-/* Return the expire time of the specified key, or -1 if no expire
- * is associated with this key (i.e. the key is non volatile) */
+/* 返回key的过期时间，如果没有永不过期则返回-1 */
 long long getExpire(redisDb *db, robj *key) {
     dictEntry *de;
 
-    /* No expire? return ASAP */
+    /* db中不存在有过期时间的key，或者在过期表中没有找到对应的key，则返回-1 */
     if (dictSize(db->expires) == 0 ||
        (de = dictFind(db->expires,key->ptr)) == NULL) return -1;
 
-    /* The entry was found in the expire dict, this means it should also
-     * be present in the main dict (safety check). */
     serverAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
     return dictGetSignedIntegerVal(de);
 }
 
-/* Propagate expires into slaves and the AOF file.
- * When a key expires in the master, a DEL operation for this key is sent
- * to all the slaves and the AOF file if enabled.
- *
- * This way the key expiry is centralized in one place, and since both
- * AOF and the master->slave link guarantee operation ordering, everything
- * will be consistent even if we allow write operations against expiring
- * keys. */
+/* 传播过期信息到slave和aof文件中
+ * 如果key在master中过期，则像slave和aof文件传播del命令 */
 void propagateExpire(redisDb *db, robj *key, int lazy) {
     robj *argv[2];
 
@@ -1243,41 +1157,27 @@ void propagateExpire(redisDb *db, robj *key, int lazy) {
     decrRefCount(argv[1]);
 }
 
-/* Check if the key is expired. */
+/* 检查key是否已经过期 */
 int keyIsExpired(redisDb *db, robj *key) {
     mstime_t when = getExpire(db,key);
     mstime_t now;
 
-    if (when < 0) return 0; /* No expire for this key */
+    if (when < 0) return 0; /* when为-1，该key永不过期 */
 
-    /* Don't expire anything while loading. It will be done later. */
+    /* 如果正在加载数据，则不作过期处理 */
     if (server.loading) return 0;
 
-    /* If we are in the context of a Lua script, we pretend that time is
-     * blocked to when the Lua script started. This way a key can expire
-     * only the first time it is accessed and not in the middle of the
-     * script execution, making propagation to slaves / AOF consistent.
-     * See issue #1525 on Github for more information. */
     if (server.lua_caller) {
         now = server.lua_time_start;
     }
-    /* If we are in the middle of a command execution, we still want to use
-     * a reference time that does not change: in that case we just use the
-     * cached time, that we update before each call in the call() function.
-     * This way we avoid that commands such as RPOPLPUSH or similar, that
-     * may re-open the same key multiple times, can invalidate an already
-     * open object in a next call, if the next call will see the key expired,
-     * while the first did not. */
+ 
     else if (server.fixed_time_expire > 0) {
         now = server.mstime;
     }
-    /* For the other cases, we want to use the most fresh time we have. */
     else {
         now = mstime();
     }
 
-    /* The key expired if the current (virtual or real) time is greater
-     * than the expire time of the key. */
     return now > when;
 }
 
@@ -1299,22 +1199,19 @@ int keyIsExpired(redisDb *db, robj *key) {
  * propagation of a DEL/UNLINK command in AOF / replication stream.
  *
  * The return value of the function is 0 if the key is still valid,
- * otherwise the function returns 1 if the key is expired. */
+ * otherwise the function returns 1 if the key is expired. 
+ * 检查键是否过期，如果过期，从数据库中删除
+ * 返回0表示没有过期或没有过期时间，返回1 表示键被删除*/
 int expireIfNeeded(redisDb *db, robj *key) {
+    // key还没到过期时间，返回0
     if (!keyIsExpired(db,key)) return 0;
 
-    /* If we are running in the context of a slave, instead of
-     * evicting the expired key from the database, we return ASAP:
-     * the slave key expiration is controlled by the master that will
-     * send us synthesized DEL operations for expired keys.
-     *
-     * Still we try to return the right information to the caller,
-     * that is, 0 if we think the key should be still valid, 1 if
-     * we think the key is expired at this time. */
+    /* slave节点不执行过期操作，slave的过期操作是同步master的DEL命令进行管理的 */
     if (server.masterhost != NULL) return 1;
 
-    /* Delete the key */
+    /* 执行到这里，说明是master中的key，且已经过期，删除key */
     server.stat_expiredkeys++;
+    // 传播删除命令到slave和aof文件
     propagateExpire(db,key,server.lazyfree_lazy_expire);
     notifyKeyspaceEvent(NOTIFY_EXPIRED,
         "expired",key,db->id);
@@ -1331,11 +1228,11 @@ int expireIfNeeded(redisDb *db, robj *key) {
 static int getKeysTempBuffer[MAX_KEYS_BUFFER];
 
 /* The base case is to use the keys position as given in the command table
- * (firstkey, lastkey, step). */
+ * (firstkey, lastkey, step). 获取命令中的所有 key */
 int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, int *numkeys) {
     int j, i = 0, last, *keys;
     UNUSED(argv);
-
+    // 如果第一个参数就是key，返回空，numkeys设置为0
     if (cmd->firstkey == 0) {
         *numkeys = 0;
         return NULL;
@@ -1381,7 +1278,7 @@ int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, in
  * table, according to the command name in argv[0].
  *
  * This function uses the command table if a command-specific helper function
- * is not required, otherwise it calls the command-specific function. */
+ * is not required, otherwise it calls the command-specific function. 从argv和argc指定的参数列表中返回所有的键 */
 int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     if (cmd->flags & CMD_MODULE_GETKEYS) {
         return moduleGetCommandKeysViaAPI(cmd,argv,argc,numkeys);
@@ -1392,7 +1289,7 @@ int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *nu
     }
 }
 
-/* Free the result of getKeysFromCommand. */
+/* 释放getKeysFromCommand的结果 */
 void getKeysFreeResult(int *result) {
     if (result != getKeysTempBuffer)
         zfree(result);
@@ -1400,7 +1297,8 @@ void getKeysFreeResult(int *result) {
 
 /* Helper function to extract keys from following commands:
  * ZUNIONSTORE <destkey> <num-keys> <key> <key> ... <key> <options>
- * ZINTERSTORE <destkey> <num-keys> <key> <key> ... <key> <options> */
+ * ZINTERSTORE <destkey> <num-keys> <key> <key> ... <key> <options> 
+ * 从ZUNIONSTORE、ZINTERSTORE命令中提取key的下标 */
 int *zunionInterGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, num, *keys;
     UNUSED(cmd);
@@ -1431,7 +1329,8 @@ int *zunionInterGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *nu
 
 /* Helper function to extract keys from the following commands:
  * EVAL <script> <num-keys> <key> <key> ... <key> [more stuff]
- * EVALSHA <script> <num-keys> <key> <key> ... <key> [more stuff] */
+ * EVALSHA <script> <num-keys> <key> <key> ... <key> [more stuff] 
+ * 从EVAL和EVALSHA命令中获取key的下标 */
 int *evalGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, num, *keys;
     UNUSED(cmd);
@@ -1462,7 +1361,8 @@ int *evalGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) 
  *
  * The first argument of SORT is always a key, however a list of options
  * follow in SQL-alike style. Here we parse just the minimum in order to
- * correctly identify keys in the "STORE" option. */
+ * correctly identify keys in the "STORE" option. 
+ * 从SORT命令中获取key的下标 */
 int *sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, j, num, *keys, found_store = 0;
     UNUSED(cmd);
@@ -1505,6 +1405,8 @@ int *sortGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) 
     return keys;
 }
 
+// 将 key 原子性地从当前实例传送到目标实例的指定数据库上，一旦传送成功， key保证会出现在目标实例上，而当前实例上的 key 会被删除。
+// MIGRATE命令中获取key的下标
 int *migrateGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys) {
     int i, num, first, *keys;
     UNUSED(cmd);
@@ -1664,16 +1566,13 @@ int *xreadGetKeys(struct redisCommand *cmd, robj **argv, int argc, int *numkeys)
     return keys;
 }
 
-/* Slot to Key API. This is used by Redis Cluster in order to obtain in
- * a fast way a key that belongs to a specified hash slot. This is useful
- * while rehashing the cluster and in other conditions when we need to
- * understand if we have keys for a given hash slot. */
+/* 将key添加到对应的slot */
 void slotToKeyUpdateKey(sds key, int add) {
     size_t keylen = sdslen(key);
     unsigned int hashslot = keyHashSlot(key,keylen);
     unsigned char buf[64];
     unsigned char *indexed = buf;
-
+    // 判断是增加key还是减少key
     server.cluster->slots_keys_count[hashslot] += add ? 1 : -1;
     if (keylen+2 > 64) indexed = zmalloc(keylen+2);
     indexed[0] = (hashslot >> 8) & 0xff;
@@ -1687,14 +1586,17 @@ void slotToKeyUpdateKey(sds key, int add) {
     if (indexed != buf) zfree(indexed);
 }
 
+// slot增加key
 void slotToKeyAdd(sds key) {
     slotToKeyUpdateKey(key,1);
 }
 
+// slot删除key
 void slotToKeyDel(sds key) {
     slotToKeyUpdateKey(key,0);
 }
 
+// 同步清空key-slot map
 void slotToKeyFlush(void) {
     raxFree(server.cluster->slots_to_keys);
     server.cluster->slots_to_keys = raxNew();
@@ -1722,8 +1624,7 @@ unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int coun
     return j;
 }
 
-/* Remove all the keys in the specified hash slot.
- * The number of removed items is returned. */
+/* 将指定的slot中的key全部移除，返回移除的元素的数量 */
 unsigned int delKeysInSlot(unsigned int hashslot) {
     raxIterator iter;
     int j = 0;
@@ -1745,6 +1646,7 @@ unsigned int delKeysInSlot(unsigned int hashslot) {
     return j;
 }
 
+// 返回指定的slot中key的数量
 unsigned int countKeysInSlot(unsigned int hashslot) {
     return server.cluster->slots_keys_count[hashslot];
 }

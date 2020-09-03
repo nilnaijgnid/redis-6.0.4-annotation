@@ -330,12 +330,15 @@ void touchWatchedKey(redisDb *db, robj *key) {
 /* On FLUSHDB or FLUSHALL all the watched keys that are present before the
  * flush but will be deleted as effect of the flushing operation should
  * be touched. "dbid" is the DB that's getting the flush. -1 if it is
- * a FLUSHALL operation (all the DBs flushed). */
+ * a FLUSHALL operation (all the DBs flushed). 
+ * 当数据库执行了FLUSHDB或FLUSHALL命令，所有的key都被清空，那么数据库中的所有的键都被touched
+ * dbid指定被FLUSH的数据库id，如果dbid为-1，表示执行了FLUSHALL，所有的数据库都被FLUSH*/
 void touchWatchedKeysOnFlush(int dbid) {
     listIter li1, li2;
     listNode *ln;
 
     /* For every client, check all the waited keys */
+    // 所有client，所有被等待的key
     listRewind(server.clients,&li1);
     while((ln = listNext(&li1))) {
         client *c = listNodeValue(ln);
@@ -345,7 +348,7 @@ void touchWatchedKeysOnFlush(int dbid) {
 
             /* For every watched key matching the specified DB, if the
              * key exists, mark the client as dirty, as the key will be
-             * removed. */
+             * removed. 数据库中存在该key，则设置client的DIRTY_CAS标识*/
             if (dbid == -1 || wk->db->id == dbid) {
                 if (dictFind(wk->db->dict, wk->key->ptr) != NULL)
                     c->flags |= CLIENT_DIRTY_CAS;
