@@ -1,32 +1,4 @@
-/* Rax -- A radix tree implementation.
- *
- * Copyright (c) 2017-2018, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
+/* Rax -- A radix tree implementation. */
 
 #ifndef RAX_H
 #define RAX_H
@@ -96,10 +68,11 @@
 
 #define RAX_NODE_MAX_SIZE ((1<<29)-1)
 typedef struct raxNode {
-    uint32_t iskey:1;     /* Does this node contain a key? */
-    uint32_t isnull:1;    /* Associated value is NULL (don't store it). */
-    uint32_t iscompr:1;   /* Node is compressed. */
-    uint32_t size:29;     /* Number of children, or compressed string len. */
+    uint32_t iskey:1;     /* 该raxNode是否包含一个key */
+    uint32_t isnull:1;    /* value是否为NULL (don't store it). */
+    uint32_t iscompr:1;   /* raxNode是否被压缩. */
+    uint32_t size:29;     /* 子节点的数量，或者是被压缩的字符串的长度 */
+    unsigned char data[]; /* 数据 */
     /* Data layout is as follows:
      *
      * If node is not compressed we have 'size' bytes, one for each children
@@ -127,7 +100,6 @@ typedef struct raxNode {
      * children, an additional value pointer is present (as you can see
      * in the representation above as "value-ptr" field).
      */
-    unsigned char data[];
 } raxNode;
 
 typedef struct rax {
@@ -136,17 +108,14 @@ typedef struct rax {
     uint64_t numnodes;
 } rax;
 
-/* Stack data structure used by raxLowWalk() in order to, optionally, return
- * a list of parent nodes to the caller. The nodes do not have a "parent"
- * field for space concerns, so we use the auxiliary stack when needed. */
+/* 被raxLowWalk()函数使用的栈数据结构 */
 #define RAX_STACK_STATIC_ITEMS 32
 typedef struct raxStack {
-    void **stack; /* Points to static_items or an heap allocated array. */
-    size_t items, maxitems; /* Number of items contained and total space. */
-    /* Up to RAXSTACK_STACK_ITEMS items we avoid to allocate on the heap
-     * and use this static array of pointers instead. */
+    void **stack; /* 指向静态项或堆分配的数组. */
+    size_t items, maxitems; /* 包含的元素的数量和最大空间 */
+    /* 未达到RAXSTACK_STACK_ITEMS，我们避免在堆上分配，而是使用这个静态指针数组。 */
     void *static_items[RAX_STACK_STATIC_ITEMS];
-    int oom; /* True if pushing into this stack failed for OOM at some point. */
+    int oom; /* 如果在某个时刻因为OOM导致push到这个栈，则为True */
 } raxStack;
 
 /* Optional callback used for iterators and be notified on each rax node,
@@ -164,28 +133,25 @@ typedef struct raxStack {
  * This is currently only supported in forward iterations (raxNext) */
 typedef int (*raxNodeCallback)(raxNode **noderef);
 
-/* Radix tree iterator state is encapsulated into this data structure. */
+/* 基树迭代器状态被封装到这个数据结构中 */
 #define RAX_ITER_STATIC_LEN 128
-#define RAX_ITER_JUST_SEEKED (1<<0) /* Iterator was just seeked. Return current
-                                       element for the first iteration and
-                                       clear the flag. */
-#define RAX_ITER_EOF (1<<1)    /* End of iteration reached. */
-#define RAX_ITER_SAFE (1<<2)   /* Safe iterator, allows operations while
-                                  iterating. But it is slower. */
+#define RAX_ITER_JUST_SEEKED (1<<0) /* 迭代器刚刚被找到。返回第一次迭代的当前元素并清除标志. */
+#define RAX_ITER_EOF (1<<1)    /* 迭代结束. */
+#define RAX_ITER_SAFE (1<<2)   /* 安全迭代器，迭代过程中允许操作，但是会更慢. */
 typedef struct raxIterator {
     int flags;
-    rax *rt;                /* Radix tree we are iterating. */
-    unsigned char *key;     /* The current string. */
-    void *data;             /* Data associated to this key. */
-    size_t key_len;         /* Current key length. */
-    size_t key_max;         /* Max key len the current key buffer can hold. */
+    rax *rt;                /* 正在迭代的Radix tree */
+    unsigned char *key;     /* 当前string. */
+    void *data;             /* 当前key关联的数据. */
+    size_t key_len;         /* 当前key的长度 */
+    size_t key_max;         /* 当前key缓冲区能存储的最大key的长度 */
     unsigned char key_static_string[RAX_ITER_STATIC_LEN];
-    raxNode *node;          /* Current node. Only for unsafe iteration. */
-    raxStack stack;         /* Stack used for unsafe iteration. */
-    raxNodeCallback node_cb; /* Optional node callback. Normally set to NULL. */
+    raxNode *node;          /* 当前radix节点，仅非安全迭代器使用 */
+    raxStack stack;         /* 非安全迭代器使用的栈 */
+    raxNodeCallback node_cb; /* 可选的radix节点回调函数，一般被设置为NULL */
 } raxIterator;
 
-/* A special pointer returned for not found items. */
+/* 未找到的项目的特殊指针 */
 extern void *raxNotFound;
 
 /* Exported API. */

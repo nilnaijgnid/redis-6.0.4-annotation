@@ -1,34 +1,4 @@
-/* Rax -- A radix tree implementation.
- *
- * Version 1.2 -- 7 February 2019
- *
- * Copyright (c) 2017-2019, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
+/* Rax -- A radix tree implementation. */
 
 #include <stdlib.h>
 #include <string.h>
@@ -44,9 +14,7 @@
 
 #include RAX_MALLOC_INCLUDE
 
-/* This is a special pointer that is guaranteed to never have the same value
- * of a radix tree node. It's used in order to report "not found" error without
- * requiring the function to have multiple return values. */
+/* 特殊指针，保证radix树中的节点不包含2个相同值的节点 */
 void *raxNotFound = (void*)"rax-not-found-pointer";
 
 /* -------------------------------- Debugging ------------------------------ */
@@ -88,9 +56,11 @@ void raxSetDebugMsg(int onoff) {
  * items are reached. It is used in order to retain the list of parent nodes
  * while walking the radix tree in order to implement certain operations that
  * need to navigate the tree upward.
+ * raxStack是一个简单的指针堆栈，一旦达到给定数量的项，就可以从使用堆栈分配的数组切换到动态堆。
+ * 它用于在遍历基树时保留父节点列表，以便实现需要向上导航树的某些操作。
  * ------------------------------------------------------------------------- */
 
-/* Initialize the stack. */
+/* 初始化栈. */
 static inline void raxStackInit(raxStack *ts) {
     ts->stack = ts->static_items;
     ts->items = 0;
@@ -98,20 +68,27 @@ static inline void raxStackInit(raxStack *ts) {
     ts->oom = 0;
 }
 
-/* Push an item into the stack, returns 1 on success, 0 on out of memory. */
+/* Push一个元素到栈中，成功返回1，内存溢出的情况下返回0. */
 static inline int raxStackPush(raxStack *ts, void *ptr) {
+    // 达到预定义的最大元素数量
     if (ts->items == ts->maxitems) {
+        // 如果栈指向的内存和预定义的数组一致，说明还没有分配堆内存？
         if (ts->stack == ts->static_items) {
+            // 将数组的容量扩大一倍
             ts->stack = rax_malloc(sizeof(void*)*ts->maxitems*2);
+            // 如果分配堆内存失败，则报OOM错误，返回0
             if (ts->stack == NULL) {
                 ts->stack = ts->static_items;
+                // 设置OOM标记
                 ts->oom = 1;
-                errno = ENOMEM;
+                errno = ENOMEM; // 不能分配内存错误
                 return 0;
             }
             memcpy(ts->stack,ts->static_items,sizeof(void*)*ts->maxitems);
         } else {
+            // 容量扩大一倍
             void **newalloc = rax_realloc(ts->stack,sizeof(void*)*ts->maxitems*2);
+            // OOM，返回0
             if (newalloc == NULL) {
                 ts->oom = 1;
                 errno = ENOMEM;
@@ -119,45 +96,46 @@ static inline int raxStackPush(raxStack *ts, void *ptr) {
             }
             ts->stack = newalloc;
         }
-        ts->maxitems *= 2;
+        ts->maxitems *= 2; // 修改最大容量
     }
-    ts->stack[ts->items] = ptr;
-    ts->items++;
+    ts->stack[ts->items] = ptr; // 将元素添加到数组最后
+    ts->items++; // 增加元素数量
     return 1;
 }
 
-/* Pop an item from the stack, the function returns NULL if there are no
- * items to pop. */
+/* 从栈中pop一个元素，如果栈中没有元素则返回NULL */
 static inline void *raxStackPop(raxStack *ts) {
     if (ts->items == 0) return NULL;
+    // 对应的元素没有删除，只是返回，但是将元素数量-1，之后有新增的元素会被覆盖
     ts->items--;
     return ts->stack[ts->items];
 }
 
-/* Return the stack item at the top of the stack without actually consuming
- * it. */
+/* 返回最顶端的元素，没有将元素数量-1，并不消费元素 */
 static inline void *raxStackPeek(raxStack *ts) {
     if (ts->items == 0) return NULL;
     return ts->stack[ts->items-1];
 }
 
-/* Free the stack in case we used heap allocation. */
+/* 如果用到了堆内存，释放stack空间 */
 static inline void raxStackFree(raxStack *ts) {
     if (ts->stack != ts->static_items) rax_free(ts->stack);
 }
 
 /* ----------------------------------------------------------------------------
- * Radix tree implementation
+ * Radix tree 实现
  * --------------------------------------------------------------------------*/
 
 /* Return the padding needed in the characters section of a node having size
  * 'nodesize'. The padding is needed to store the child pointers to aligned
  * addresses. Note that we add 4 to the node size because the node has a four
- * bytes header. */
+ * bytes header. 
+ * 返回大小为“nodesize”的节点的字符部分所需的填充。需要填充来存储指向对齐地址的子指针。
+ * 注意：我们在节点大小上加4，因为节点有一个4字节的header*/
 #define raxPadding(nodesize) ((sizeof(void*)-((nodesize+4) % sizeof(void*))) & (sizeof(void*)-1))
 
 /* Return the pointer to the last child pointer in a node. For the compressed
- * nodes this is the only child pointer. */
+ * nodes this is the only child pointer. 返回指向节点中最后一个子指针的指针。对于压缩节点，这是唯一的子指针。*/
 #define raxNodeLastChildPtr(n) ((raxNode**) ( \
     ((char*)(n)) + \
     raxNodeCurrentLength(n) - \
@@ -165,7 +143,7 @@ static inline void raxStackFree(raxStack *ts) {
     (((n)->iskey && !(n)->isnull) ? sizeof(void*) : 0) \
 ))
 
-/* Return the pointer to the first child pointer. */
+/* 返回指向第一个子指针的指针 Return the pointer to the first child pointer. */
 #define raxNodeFirstChildPtr(n) ((raxNode**) ( \
     (n)->data + \
     (n)->size + \
@@ -173,7 +151,8 @@ static inline void raxStackFree(raxStack *ts) {
 
 /* Return the current total size of the node. Note that the second line
  * computes the padding after the string of characters, needed in order to
- * save pointers to aligned addresses. */
+ * save pointers to aligned addresses. 
+ * 返回当前节点的总大小。注意：第二行计算字符串后面的填充，这是保存指向对齐地址的指针所必需的 */
 #define raxNodeCurrentLength(n) ( \
     sizeof(raxNode)+(n)->size+ \
     raxPadding((n)->size)+ \
@@ -184,7 +163,9 @@ static inline void raxStackFree(raxStack *ts) {
 /* Allocate a new non compressed node with the specified number of children.
  * If datafiled is true, the allocation is made large enough to hold the
  * associated data pointer.
- * Returns the new node pointer. On out of memory NULL is returned. */
+ * Returns the new node pointer. On out of memory NULL is returned. 
+ * 分配一个新的拥有指定数量的子节点的非压缩节点，如果datafield参数为True，分配的大小足以容纳关联的数据指针。
+ * 返回新的节点的指针，内存溢出则返回NULL */
 raxNode *raxNewNode(size_t children, int datafield) {
     size_t nodesize = sizeof(raxNode)+children+raxPadding(children)+
                       sizeof(raxNode*)*children;
@@ -198,11 +179,10 @@ raxNode *raxNewNode(size_t children, int datafield) {
     return node;
 }
 
-/* Allocate a new rax and return its pointer. On out of memory the function
- * returns NULL. */
+/* 分配一个新的rax并返回其指针，内存溢出则返回NULL */
 rax *raxNew(void) {
     rax *rax = rax_malloc(sizeof(*rax));
-    if (rax == NULL) return NULL;
+    if (rax == NULL) return NULL; // 内存溢出
     rax->numele = 0;
     rax->numnodes = 1;
     rax->head = raxNewNode(0,0);
@@ -214,7 +194,8 @@ rax *raxNew(void) {
     }
 }
 
-/* realloc the node to make room for auxiliary data in order
+/* 重新分配节点，为辅助的数据提供空间，内存溢出返回NULL
+ * realloc the node to make room for auxiliary data in order
  * to store an item in that node. On out of memory NULL is returned. */
 raxNode *raxReallocForData(raxNode *n, void *data) {
     if (data == NULL) return n; /* No reallocation needed, setting isnull=1 */
@@ -222,7 +203,7 @@ raxNode *raxReallocForData(raxNode *n, void *data) {
     return rax_realloc(n,curlen+sizeof(void*));
 }
 
-/* Set the node auxiliary data to the specified pointer. */
+/* 将节点辅助数据设置为指定的指针. */
 void raxSetData(raxNode *n, void *data) {
     n->iskey = 1;
     if (data != NULL) {
@@ -235,7 +216,7 @@ void raxSetData(raxNode *n, void *data) {
     }
 }
 
-/* Get the node auxiliary data. */
+/* 获取节点的辅助数据 */
 void *raxGetData(raxNode *n) {
     if (n->isnull) return NULL;
     void **ndata =(void**)((char*)n+raxNodeCurrentLength(n)-sizeof(void*));
@@ -244,15 +225,12 @@ void *raxGetData(raxNode *n) {
     return data;
 }
 
-/* Add a new child to the node 'n' representing the character 'c' and return
- * its new pointer, as well as the child pointer by reference. Additionally
- * '***parentlink' is populated with the raxNode pointer-to-pointer of where
- * the new child was stored, which is useful for the caller to replace the
- * child pointer if it gets reallocated.
- *
- * On success the new parent node pointer is returned (it may change because
- * of the realloc, so the caller should discard 'n' and use the new value).
- * On out of memory NULL is returned, and the old node is still valid. */
+/* 向表示字符“c”的节点“n”添加新的子级，并通过引用返回其新指针以及子级指针。 
+ * 另外，'***parentlink'填充了raxNode指针，指向新子指针的存储位置，
+ * 这对于调用者在重新分配子指针时替换子指针非常有用。
+ * 
+ * 成功时，将返回新的父节点指针（它可能会因重新分配而更改，因此调用方应放弃“n”并使用新值）。
+ * 当内存不足时返回NULL，旧节点仍然有效。 */
 raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode ***parentlink) {
     assert(n->iscompr == 0);
 
