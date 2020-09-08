@@ -1,63 +1,3 @@
-/* Background I/O service for Redis.
- *
- * This file implements operations that we need to perform in the background.
- * Currently there is only a single operation, that is a background close(2)
- * system call. This is needed as when the process is the last owner of a
- * reference to a file closing it means unlinking it, and the deletion of the
- * file is slow, blocking the server.
- *
- * In the future we'll either continue implementing new things we need or
- * we'll switch to libeio. However there are probably long term uses for this
- * file as we may want to put here Redis specific background tasks (for instance
- * it is not impossible that we'll need a non blocking FLUSHDB/FLUSHALL
- * implementation).
- *
- * DESIGN
- * ------
- *
- * The design is trivial, we have a structure representing a job to perform
- * and a different thread and job queue for every job type.
- * Every thread waits for new jobs in its queue, and process every job
- * sequentially.
- *
- * Jobs of the same type are guaranteed to be processed from the least
- * recently inserted to the most recently inserted (older jobs processed
- * first).
- *
- * Currently there is no way for the creator of the job to be notified about
- * the completion of the operation, this will only be added when/if needed.
- *
- * ----------------------------------------------------------------------------
- *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
-
 #include "server.h"
 #include "bio.h"
 
@@ -77,10 +17,8 @@ static unsigned long long bio_pending[BIO_NUM_OPS];
 /* This structure represents a background Job. It is only used locally to this
  * file as the API does not expose the internals at all. */
 struct bio_job {
-    time_t time; /* Time at which the job was created. */
-    /* Job specific arguments pointers. If we need to pass more than three
-     * arguments we can just pass a pointer to a structure or alike. */
-    void *arg1, *arg2, *arg3;
+    time_t time; /* Job创建的时间 */
+    void *arg1, *arg2, *arg3; /* Job参数*/
 };
 
 void *bioProcessBackgroundJobs(void *arg);
@@ -92,7 +30,7 @@ void lazyfreeFreeSlotsMapFromBioThread(zskiplist *sl);
  * main thread. */
 #define REDIS_THREAD_STACK_SIZE (1024*1024*4)
 
-/* Initialize the background system, spawning the thread. */
+/* 初始化后台系统，创建新的线程 */
 void bioInit(void) {
     pthread_attr_t attr;
     pthread_t thread;
@@ -229,7 +167,7 @@ void *bioProcessBackgroundJobs(void *arg) {
     }
 }
 
-/* Return the number of pending jobs of the specified type. */
+/* 返回指定的类型的pending状态的job */
 unsigned long long bioPendingJobsOfType(int type) {
     unsigned long long val;
     pthread_mutex_lock(&bio_mutex[type]);
@@ -238,9 +176,7 @@ unsigned long long bioPendingJobsOfType(int type) {
     return val;
 }
 
-/* If there are pending jobs for the specified type, the function blocks
- * and waits that the next job was processed. Otherwise the function
- * does not block and returns ASAP.
+/* 如果存在指定类型的job在pending状态，该函数阻塞并且等到下一个job被执行，否则函数不阻塞并尽快返回
  *
  * The function returns the number of jobs still to process of the
  * requested type.
@@ -260,10 +196,8 @@ unsigned long long bioWaitStepOfType(int type) {
     return val;
 }
 
-/* Kill the running bio threads in an unclean way. This function should be
- * used only when it's critical to stop the threads for some reason.
- * Currently Redis does this only on crash (for instance on SIGSEGV) in order
- * to perform a fast memory check without other threads messing with memory. */
+/* 使用一种不干净的方式杀掉在运行中的bio线程。该函数只应该在很严重的情况下才会执行，
+ * 目前只有在redis崩溃时执行快速内存检查时才会执行 */
 void bioKillThreads(void) {
     int err, j;
 
