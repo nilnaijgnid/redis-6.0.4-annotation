@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2018, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "sha256.h"
 #include <fcntl.h>
@@ -38,20 +9,12 @@
 
 rax *Users; /* Table mapping usernames to user structures. */
 
-user *DefaultUser;  /* Global reference to the default user.
-                       Every new connection is associated to it, if no
-                       AUTH or HELLO is used to authenticate with a
-                       different user. */
+user *DefaultUser;  /* 全局默认用户，如果没有使用AUTH或者HELLO命令关联到一个新的用户，每个新的连接都与之关联 */
 
-list *UsersToLoad;  /* This is a list of users found in the configuration file
-                       that we'll need to load in the final stage of Redis
-                       initialization, after all the modules are already
-                       loaded. Every list element is a NULL terminated
-                       array of SDS pointers: the first is the user name,
-                       all the remaining pointers are ACL rules in the same
-                       format as ACLSetUser(). */
-list *ACLLog;       /* Our security log, the user is able to inspect that
-                       using the ACL LOG command .*/
+list *UsersToLoad;  /* redis初始化的最后阶段，所有模块以及加载完毕后，从配置文件中加载的用户信息. 
+                     * 每个列表都是以NULL结尾的SDS指针，第一个是用户名，
+                     * 所有剩下的指针与ACLSetUser()格式相同 */
+list *ACLLog;       /* 安全日志，可以使用ACL LOG命令查看 */
 
 struct ACLCategoryItem {
     const char *name;
@@ -78,7 +41,7 @@ struct ACLCategoryItem {
     {"connection", CMD_CATEGORY_CONNECTION},
     {"transaction", CMD_CATEGORY_TRANSACTION},
     {"scripting", CMD_CATEGORY_SCRIPTING},
-    {NULL,0} /* Terminator. */
+    {NULL,0} /* 结束符. */
 };
 
 struct ACLUserFlag {
@@ -98,36 +61,23 @@ void ACLResetSubcommands(user *u);
 void ACLAddAllowedSubcommand(user *u, unsigned long id, const char *sub);
 void ACLFreeLogEntry(void *le);
 
-/* The length of the string representation of a hashed password. */
-#define HASH_PASSWORD_LEN SHA256_BLOCK_SIZE*2
+/* 哈希密码的长度 */
+#define HASH_PASSWORD_LEN SHA256_BLOCK_SIZE*2 // 32 * 2
 
 /* =============================================================================
  * Helper functions for the rest of the ACL implementation
  * ==========================================================================*/
 
-/* Return zero if strings are the same, non-zero if they are not.
- * The comparison is performed in a way that prevents an attacker to obtain
- * information about the nature of the strings just monitoring the execution
- * time of the function.
- *
- * Note that limiting the comparison length to strings up to 512 bytes we
- * can avoid leaking any information about the password length and any
- * possible branch misprediction related leak.
- */
+/* 如果2个string相同返回0，否则返回非0 */
 int time_independent_strcmp(char *a, char *b) {
     char bufa[CONFIG_AUTHPASS_MAX_LEN], bufb[CONFIG_AUTHPASS_MAX_LEN];
-    /* The above two strlen perform len(a) + len(b) operations where either
-     * a or b are fixed (our password) length, and the difference is only
-     * relative to the length of the user provided string, so no information
-     * leak is possible in the following two lines of code. */
+
     unsigned int alen = strlen(a);
     unsigned int blen = strlen(b);
     unsigned int j;
     int diff = 0;
 
-    /* We can't compare strings longer than our static buffers.
-     * Note that this will never pass the first test in practical circumstances
-     * so there is no info leak. */
+    /* 防止内存泄露 */
     if (alen > sizeof(bufa) || blen > sizeof(bufb)) return 1;
 
     memset(bufa,0,sizeof(bufa));        /* Constant time. */
@@ -144,11 +94,10 @@ int time_independent_strcmp(char *a, char *b) {
     }
     /* Length must be equal as well. */
     diff |= alen ^ blen;
-    return diff; /* If zero strings are the same. */
+    return diff; /* 如果相同返回0 */
 }
 
-/* Given an SDS string, returns the SHA256 hex representation as a
- * new SDS string. */
+/* 提供一个SDS字符串，将SHA256十六进制表示形式作为新的SDS字符串返回. */
 sds ACLHashPassword(unsigned char *cleartext, size_t len) {
     SHA256_CTX ctx;
     unsigned char hash[SHA256_BLOCK_SIZE];
@@ -166,16 +115,14 @@ sds ACLHashPassword(unsigned char *cleartext, size_t len) {
     return sdsnewlen(hex,HASH_PASSWORD_LEN);
 }
 
-/* Given a hash and the hash length, returns C_OK if it is a valid password 
- * hash, or C_ERR otherwise. */
+/* 提供一个hash和hash长度，如果是一个有效的密码哈希返回C_OK，否则返回C_ERR */
 int ACLCheckPasswordHash(unsigned char *hash, int hashlen) {
+    // 长度必须是64位
     if (hashlen != HASH_PASSWORD_LEN) {
         return C_ERR;      
     }
  
-    /* Password hashes can only be characters that represent
-     * hexadecimal values, which are numbers and lowercase 
-     * characters 'a' through 'f'. */
+    /* 有效的hash必须是0-9和a-f之间 */
     for(int i = 0; i < HASH_PASSWORD_LEN; i++) {
         char c = hash[i];
         if ((c < 'a' || c > 'f') && (c < '0' || c > '9')) {
@@ -189,11 +136,10 @@ int ACLCheckPasswordHash(unsigned char *hash, int hashlen) {
  * Low level ACL API
  * ==========================================================================*/
 
-/* Return 1 if the specified string contains spaces or null characters.
- * We do this for usernames and key patterns for simpler rewriting of
- * ACL rules, presentation on ACL list, and to avoid subtle security bugs
- * that may arise from parsing the rules in presence of escapes.
- * The function returns 0 if the string has no spaces. */
+/* 如果给定的字符串包含空格或者NULL则返回1，没有空格则返回0
+ * 
+ * 对于用户名和密钥模式，我们这样做是为了简化ACL规则的重写，ACL列表上的表示，
+ * 并避免在存在转义的情况下解析规则时可能产生的细微的安全错误 */
 int ACLStringHasSpaces(const char *s, size_t len) {
     for (size_t i = 0; i < len; i++) {
         if (isspace(s[i]) || s[i] == 0) return 1;
@@ -201,39 +147,35 @@ int ACLStringHasSpaces(const char *s, size_t len) {
     return 0;
 }
 
-/* Given the category name the command returns the corresponding flag, or
- * zero if there is no match. */
+/* 根据给定的类比名称，返回对应的flag，如果没有匹配的则返回0. */
 uint64_t ACLGetCommandCategoryFlagByName(const char *name) {
     for (int j = 0; ACLCommandCategories[j].flag != 0; j++) {
         if (!strcasecmp(name,ACLCommandCategories[j].name)) {
             return ACLCommandCategories[j].flag;
         }
     }
-    return 0; /* No match. */
+    return 0; /* 没有匹配到 */
 }
 
-/* Method for passwords/pattern comparison used for the user->passwords list
- * so that we can search for items with listSearchKey(). */
+/* 用于user->passwords列表的密码/模式比较方法，以便我们可以使用listSearchKey()搜索项。 */
 int ACLListMatchSds(void *a, void *b) {
     return sdscmp(a,b) == 0;
 }
 
-/* Method to free list elements from ACL users password/patterns lists. */
+/* 从ACL用户密码/模式列表中释放列表元素的方法 */
 void ACLListFreeSds(void *item) {
     sdsfree(item);
 }
 
-/* Method to duplicate list elements from ACL users password/patterns lists. */
+/* 从ACL用户密码/模式列表复制列表元素的方法 */
 void *ACLListDupSds(void *item) {
     return sdsdup(item);
 }
 
-/* Create a new user with the specified name, store it in the list
- * of users (the Users global radix tree), and returns a reference to
- * the structure representing the user.
- *
- * If the user with such name already exists NULL is returned. */
+/* 使用指定的用户名创建一个用户，存储到用户列表中，并返回对应的用户结构的引用
+ * 如果对应的用户名已经存在则返回NULL. */
 user *ACLCreateUser(const char *name, size_t namelen) {
+    // 用户已经存在
     if (raxFind(Users,(unsigned char*)name,namelen) != raxNotFound) return NULL;
     user *u = zmalloc(sizeof(*u));
     u->name = sdsnewlen(name,namelen);
