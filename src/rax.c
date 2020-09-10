@@ -225,26 +225,25 @@ void *raxGetData(raxNode *n) {
     return data;
 }
 
-/* 向表示字符“c”的节点“n”添加新的子级，并通过引用返回其新指针以及子级指针。 
+/* 向表示字符“c”的节点“n”添加新的子节点，并通过引用返回其新指针以及子级指针。 
  * 另外，'***parentlink'填充了raxNode指针，指向新子指针的存储位置，
  * 这对于调用者在重新分配子指针时替换子指针非常有用。
  * 
  * 成功时，将返回新的父节点指针（它可能会因重新分配而更改，因此调用方应放弃“n”并使用新值）。
  * 当内存不足时返回NULL，旧节点仍然有效。 */
 raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode ***parentlink) {
-    assert(n->iscompr == 0);
+    assert(n->iscompr == 0); // 非压缩节点
 
     size_t curlen = raxNodeCurrentLength(n);
     n->size++;
     size_t newlen = raxNodeCurrentLength(n);
-    n->size--; /* For now restore the orignal size. We'll update it only on
-                  success at the end. */
+    n->size--; /* 暂时还原到原始大小，执行成功时再更新 */
 
-    /* Alloc the new child we will link to 'n'. */
+    /* 分配链接到节点n的子节点 */
     raxNode *child = raxNewNode(0,0);
     if (child == NULL) return NULL;
 
-    /* Make space in the original node. */
+    /* 原本的节点扩容 */
     raxNode *newn = rax_realloc(n,newlen);
     if (newn == NULL) {
         rax_free(child);
@@ -282,6 +281,7 @@ raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode **
      * loop. */
     int pos;
     for (pos = 0; pos < n->size; pos++) {
+        // 将每个字符和要插入的字符的ASCII码比较，确认插入的位置
         if (n->data[pos] > c) break;
     }
 
@@ -371,8 +371,10 @@ raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode **
  *
  * The function also returns a child node, since the last node of the
  * compressed chain cannot be part of the chain: it has zero children while
- * we can only compress inner nodes with exactly one child each. */
+ * we can only compress inner nodes with exactly one child each. 
+ * 将非压缩节点转换为压缩节点*/
 raxNode *raxCompressNode(raxNode *n, unsigned char *s, size_t len, raxNode **child) {
+    // 保证节点n大小为0且不为压缩节点
     assert(n->size == 0 && n->iscompr == 0);
     void *data = NULL; /* Initialized only to avoid warnings. */
     size_t newsize;
@@ -383,7 +385,7 @@ raxNode *raxCompressNode(raxNode *n, unsigned char *s, size_t len, raxNode **chi
     *child = raxNewNode(0,0);
     if (*child == NULL) return NULL;
 
-    /* Make space in the parent node. */
+    /* 父节点增加空间 */
     newsize = sizeof(raxNode)+len+raxPadding(len)+sizeof(raxNode*);
     if (n->iskey) {
         data = raxGetData(n); /* To restore it later. */
@@ -477,13 +479,9 @@ static inline size_t raxLowWalk(rax *rax, unsigned char *s, size_t len, raxNode 
     return i;
 }
 
-/* Insert the element 's' of size 'len', setting as auxiliary data
- * the pointer 'data'. If the element is already present, the associated
- * data is updated (only if 'overwrite' is set to 1), and 0 is returned,
- * otherwise the element is inserted and 1 is returned. On out of memory the
- * function returns 0 as well but sets errno to ENOMEM, otherwise errno will
- * be set to 0.
- */
+/* 插入长度为len的元素s，并将辅助数据设置为data。如果元素已经存在，在overwrite设置为1的情况下，
+ * 数据会被更新并返回0，否则元素被插入并返回1。内存溢出的情况下也返回0，而且errno会被设置为ENOMEM，
+ * 其他情况下errno被设置为0 */
 int raxGenericInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old, int overwrite) {
     size_t i;
     int j = 0; /* Split position. If raxLowWalk() stops in a compressed
@@ -877,22 +875,17 @@ oom:
     return 0;
 }
 
-/* Overwriting insert. Just a wrapper for raxGenericInsert() that will
- * update the element if there is already one for the same key. */
+/* 插入，如果存在则更新 */
 int raxInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
     return raxGenericInsert(rax,s,len,data,old,1);
 }
 
-/* Non overwriting insert function: this if an element with the same key
- * exists, the value is not updated and the function returns 0.
- * This is a just a wrapper for raxGenericInsert(). */
+/* 插入，如果存在则不更新 */
 int raxTryInsert(rax *rax, unsigned char *s, size_t len, void *data, void **old) {
     return raxGenericInsert(rax,s,len,data,old,0);
 }
 
-/* Find a key in the rax, returns raxNotFound special void pointer value
- * if the item was not found, otherwise the value associated with the
- * item is returned. */
+/* 在rax中查找一个key，如果没找到返回raxNotfound这个特殊的指针，否则返回对应的元素 */
 void *raxFind(rax *rax, unsigned char *s, size_t len) {
     raxNode *h;
 
@@ -904,7 +897,8 @@ void *raxFind(rax *rax, unsigned char *s, size_t len) {
     return raxGetData(h);
 }
 
-/* Return the memory address where the 'parent' node stores the specified
+/* 返回指定的child的父节点的内存地址，
+ * Return the memory address where the 'parent' node stores the specified
  * 'child' pointer, so that the caller can update the pointer with another
  * one if needed. The function assumes it will find a match, otherwise the
  * operation is an undefined behavior (it will continue scanning the
@@ -920,7 +914,8 @@ raxNode **raxFindParentLink(raxNode *parent, raxNode *child) {
     return cp;
 }
 
-/* Low level child removal from node. The new node pointer (after the child
+/* 低级别的从某个parent下移除child
+ * Low level child removal from node. The new node pointer (after the child
  * removal) is returned. Note that this function does not fix the pointer
  * of the parent node in its parent, so this task is up to the caller.
  * The function never fails for out of memory. */
@@ -995,8 +990,7 @@ raxNode *raxRemoveChild(raxNode *parent, raxNode *child) {
     return newnode ? newnode : parent;
 }
 
-/* Remove the specified item. Returns 1 if the item was found and
- * deleted, 0 otherwise. */
+/* 移除指定的元素，找到并移除返回1，否则返回0 */
 int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
     raxNode *h;
     raxStack ts;
@@ -1196,8 +1190,7 @@ int raxRemove(rax *rax, unsigned char *s, size_t len, void **old) {
     return 1;
 }
 
-/* This is the core of raxFree(): performs a depth-first scan of the
- * tree and releases all the nodes found. */
+/* raxFree()函数的核心: 执行深度优先的scan操作，并释放所有找到的节点. */
 void raxRecursiveFree(rax *rax, raxNode *n, void (*free_callback)(void*)) {
     debugnode("free traversing",n);
     int numchildren = n->iscompr ? 1 : n->size;
@@ -1215,22 +1208,22 @@ void raxRecursiveFree(rax *rax, raxNode *n, void (*free_callback)(void*)) {
     rax->numnodes--;
 }
 
-/* Free a whole radix tree, calling the specified callback in order to
- * free the auxiliary data. */
+/* 释放整个radix tree，调用指定的回调函数释放辅助数据 */
 void raxFreeWithCallback(rax *rax, void (*free_callback)(void*)) {
     raxRecursiveFree(rax,rax->head,free_callback);
     assert(rax->numnodes == 0);
     rax_free(rax);
 }
 
-/* Free a whole radix tree. */
+/* 释放整个radix tree. */
 void raxFree(rax *rax) {
     raxFreeWithCallback(rax,NULL);
 }
 
 /* ------------------------------- Iterator --------------------------------- */
 
-/* Initialize a Rax iterator. This call should be performed a single time
+/* 初始化Rax迭代器
+ * Initialize a Rax iterator. This call should be performed a single time
  * to initialize the iterator, and must be followed by a raxSeek() call,
  * otherwise the raxPrev()/raxNext() functions will just return EOF. */
 void raxStart(raxIterator *it, rax *rt) {
