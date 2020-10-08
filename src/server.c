@@ -1,32 +1,3 @@
-/*
- * Copyright (c) 2009-2016, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "server.h"
 #include "cluster.h"
 #include "slowlog.h"
@@ -69,103 +40,57 @@ double R_Zero, R_PosInf, R_NegInf, R_Nan;
 /*================================= Globals ================================= */
 
 /* Global vars */
-struct redisServer server; /* Server global state */
-volatile unsigned long lru_clock; /* Server global current LRU time. */
+struct redisServer server; /* Server全局状态 */
+volatile unsigned long lru_clock; /* Server全局当前LRU时间. */
 
-/* Our command table.
+/* 命令表.
+ * 每个条目由以下字段组成:
+ * 
+ *  {"module",moduleCommand,-2,
+ *   "admin no-script",
+ *   0,NULL,0,0,0,0,0,0},
  *
- * Every entry is composed of the following fields:
+ * name:            命令名称
+ * function:        指向实现命令的函数的指针
+ * arity:           参数的数量，-N的意思是>=N个参数
+ * sflags:          命令flag，下面有flag表
+ * flags:           sflags的二进制标识形式，可以通过位运算进行组合
+ * 
+ * get_keys_proc:   可选的函数，用来获取命令中key的参数，一般用于三个字段不够执行键的参数的情况。
+ * first_key_index: 第一个参数是key
+ * last_key_index:  最后一个参数是key
+ * key_step:        从第一个 key 到最后一个 key 的步长。MSET 的步长是 2 因为：key,val,key,val,...
+ * microseconds:    记录执行命令的耗费总时长
+ * calls:           记录命令被执行的总次数
+ * id:              ACL或其他目标的命令位标识符
  *
- * name:        A string representing the command name.
+ * flags, microseconds and calls 字段都是由redis计算得来的，应该被设置为0
+ * 命令的flag使用空格分隔的字符串表示，使用populateCommandTable()函数转换为实际的flag
+ * 
+ * flags的含义:
+ * 
+ * write:          写命令（可能会修改key空间）
+ * read-only:      只读命令
+ * use-memory:     一旦调用会增加内存的使用，内存溢出的情况下不允许调用
+ * admin:          管理命令，像SAVE和SHUTDOWN
+ * pub-sub:        Pub/Sub相关的命令
+ * no-script:      不允许在脚本中执行的命令
+ * random:         随机命令，同样的命令和参数会返回不同的结果，类似于SPOP和RANDOMKEY
+ * to-sort:        如果从脚本调用Sort命令输出数组，则输出是确定性的。 使用这个flag，那么randomflag就不需要了
+ * ok-loading:     加载数据库的时候允许调用
+ * ok-stale:       从节点服务器持有过期数据时，允许执行的命令。
+ * no-monitor:     在MONITOR不自动传播的命令
+ * no-slowlog:     不传播到slowlog的命令
+ * cluster-asking: 为该命令执行一个隐式的 ASKING，所以在集群模式下，如果槽被标记为'importing'，那这个命令会被接收。
+ * fast:           快速执行的命令。时间复杂度为O(1) or O(log(N))的命令只要内核调度为Redis分配时间片，那么就不应该在执行时被延迟
  *
- * function:    Pointer to the C function implementing the command.
- *
- * arity:       Number of arguments, it is possible to use -N to say >= N
- *
- * sflags:      Command flags as string. See below for a table of flags.
- *
- * flags:       Flags as bitmask. Computed by Redis using the 'sflags' field.
- *
- * get_keys_proc: An optional function to get key arguments from a command.
- *                This is only used when the following three fields are not
- *                enough to specify what arguments are keys.
- *
- * first_key_index: First argument that is a key
- *
- * last_key_index: Last argument that is a key
- *
- * key_step:    Step to get all the keys from first to last argument.
- *              For instance in MSET the step is two since arguments
- *              are key,val,key,val,...
- *
- * microseconds: Microseconds of total execution time for this command.
- *
- * calls:       Total number of calls of this command.
- *
- * id:          Command bit identifier for ACLs or other goals.
- *
- * The flags, microseconds and calls fields are computed by Redis and should
- * always be set to zero.
- *
- * Command flags are expressed using space separated strings, that are turned
- * into actual flags by the populateCommandTable() function.
- *
- * This is the meaning of the flags:
- *
- * write:       Write command (may modify the key space).
- *
- * read-only:   All the non special commands just reading from keys without
- *              changing the content, or returning other informations like
- *              the TIME command. Special commands such administrative commands
- *              or transaction related commands (multi, exec, discard, ...)
- *              are not flagged as read-only commands, since they affect the
- *              server or the connection in other ways.
- *
- * use-memory:  May increase memory usage once called. Don't allow if out
- *              of memory.
- *
- * admin:       Administrative command, like SAVE or SHUTDOWN.
- *
- * pub-sub:     Pub/Sub related command.
- *
- * no-script:   Command not allowed in scripts.
- *
- * random:      Random command. Command is not deterministic, that is, the same
- *              command with the same arguments, with the same key space, may
- *              have different results. For instance SPOP and RANDOMKEY are
- *              two random commands.
- *
- * to-sort:     Sort command output array if called from script, so that the
- *              output is deterministic. When this flag is used (not always
- *              possible), then the "random" flag is not needed.
- *
- * ok-loading:  Allow the command while loading the database.
- *
- * ok-stale:    Allow the command while a slave has stale data but is not
- *              allowed to serve this data. Normally no command is accepted
- *              in this condition but just a few.
- *
- * no-monitor:  Do not automatically propagate the command on MONITOR.
- *
- * no-slowlog:  Do not automatically propagate the command to the slowlog.
- *
- * cluster-asking: Perform an implicit ASKING for this command, so the
- *              command will be accepted in cluster mode if the slot is marked
- *              as 'importing'.
- *
- * fast:        Fast command: O(1) or O(log(N)) command that should never
- *              delay its execution as long as the kernel scheduler is giving
- *              us time. Note that commands that may trigger a DEL as a side
- *              effect (like SET) are not fast commands.
- *
- * The following additional flags are only used in order to put commands
- * in a specific ACL category. Commands can have multiple ACL categories.
+ * 以下特殊的flags仅仅用来将命令添加到指定的ACL目录中，命令可以有多个ACL目录。
  *
  * @keyspace, @read, @write, @set, @sortedset, @list, @hash, @string, @bitmap,
  * @hyperloglog, @stream, @admin, @fast, @slow, @pubsub, @blocking, @dangerous,
  * @connection, @transaction, @scripting, @geo.
  *
- * Note that:
+ * 注意:
  *
  * 1) The read-only flag implies the @read ACL category.
  * 2) The write flag implies the @write ACL category.
@@ -1017,8 +942,7 @@ struct redisCommand redisCommandTable[] = {
  * function of Redis may be called from other threads. */
 void nolocks_localtime(struct tm *tmp, time_t t, time_t tz, int dst);
 
-/* Low level logging. To use only for very big messages, otherwise
- * serverLog() is to prefer. */
+/* 低级的日志输出，只有在日志量特别大的时候才使用，否则使用serverLog()是个更好的选择 */
 void serverLogRaw(int level, const char *msg) {
     const int syslogLevelMap[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING };
     const char *c = ".-*#";
@@ -1028,9 +952,9 @@ void serverLogRaw(int level, const char *msg) {
     int log_to_stdout = server.logfile[0] == '\0';
 
     level &= 0xff; /* clear flags */
-    if (level < server.verbosity) return;
+    if (level < server.verbosity) return; // 日志等级小于用户定义的日志等级
 
-    fp = log_to_stdout ? stdout : fopen(server.logfile,"a");
+    fp = log_to_stdout ? stdout : fopen(server.logfile,"a"); // 判断是追加到日志文件还是输出到控制台
     if (!fp) return;
 
     if (rawmode) {
@@ -1049,9 +973,9 @@ void serverLogRaw(int level, const char *msg) {
         if (server.sentinel_mode) {
             role_char = 'X'; /* Sentinel. */
         } else if (pid != server.pid) {
-            role_char = 'C'; /* RDB / AOF writing child. */
+            role_char = 'C'; /* RDB / AOF 子进程 */
         } else {
-            role_char = (server.masterhost ? 'S':'M'); /* Slave or Master. */
+            role_char = (server.masterhost ? 'S':'M'); /* 判断当前节点是master还是slave */
         }
         fprintf(fp,"%d:%c %s %c %s\n",
             (int)getpid(),role_char, buf,c[level],msg);
@@ -1062,28 +986,21 @@ void serverLogRaw(int level, const char *msg) {
     if (server.syslog_enabled) syslog(syslogLevelMap[level], "%s", msg);
 }
 
-/* Like serverLogRaw() but with printf-alike support. This is the function that
- * is used across the code. The raw version is only used in order to dump
- * the INFO output on crash. */
+/* redis主要使用这个函数记录日志，serverLogRaw()函数主要用于在crash的时候dump的信息 */
 void serverLog(int level, const char *fmt, ...) {
     va_list ap;
-    char msg[LOG_MAX_LEN];
+    char msg[LOG_MAX_LEN]; // 默认1024
 
-    if ((level&0xff) < server.verbosity) return;
+    if ((level&0xff) < server.verbosity) return; // 日志等级小于用户定义的日志等级
 
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-
+    // 调用serverLogRaw()函数写入日志
     serverLogRaw(level,msg);
 }
 
-/* Log a fixed message without printf-alike capabilities, in a way that is
- * safe to call from a signal handler.
- *
- * We actually use this only for signals that are not fatal from the point
- * of view of Redis. Signals that are going to kill the server anyway and
- * where we need printf-alike features are served by serverLog(). */
+/*  记录处理signal的日志 */
 void serverLogFromHandler(int level, const char *msg) {
     int fd;
     int log_to_stdout = server.logfile[0] == '\0';
@@ -1106,7 +1023,7 @@ err:
     if (!log_to_stdout) close(fd);
 }
 
-/* Return the UNIX time in microseconds */
+/* 返回单位为微秒的Unix时间 */
 long long ustime(void) {
     struct timeval tv;
     long long ust;
@@ -1117,15 +1034,13 @@ long long ustime(void) {
     return ust;
 }
 
-/* Return the UNIX time in milliseconds */
+/* 返回单位为毫秒的Unix时间 */
 mstime_t mstime(void) {
     return ustime()/1000;
 }
 
-/* After an RDB dump or AOF rewrite we exit from children using _exit() instead of
- * exit(), because the latter may interact with the same file objects used by
- * the parent process. However if we are testing the coverage normal exit() is
- * used in order to obtain the right coverage information. */
+/* 当RDB DUMP或者AOF rewrite之后我们从线程退出时使用_exit()而不是exit()
+ * 因为稍后父进程可能会对同一个文件对象做操作，_exit()函数不会清空IO缓冲区 */
 void exitFromChild(int retcode) {
 #ifdef COVERAGE_TEST
     exit(retcode);
@@ -1136,22 +1051,22 @@ void exitFromChild(int retcode) {
 
 /*====================== Hash table type implementation  ==================== */
 
-/* This is a hash table type that uses the SDS dynamic strings library as
- * keys and redis objects as values (objects can hold SDS strings,
- * lists, sets). */
+/* 使用SDS动态字符串库作为key，redis object作为value（可以容纳SDS，lists，sets）的哈希表 */
 
+// dict释放方法
 void dictVanillaFree(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
     zfree(val);
 }
-
+// list释放方法
 void dictListDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
     listRelease((list*)val);
 }
 
+// SDS比较
 int dictSdsKeyCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -1164,8 +1079,7 @@ int dictSdsKeyCompare(void *privdata, const void *key1,
     return memcmp(key1, key2, l1) == 0;
 }
 
-/* A case insensitive version used for the command lookup table and other
- * places where case insensitive non binary-safe comparison is needed. */
+/* 大小写不敏感的SDS比较，用于命令的查找和一些非二进制安全的比较的场景. */
 int dictSdsKeyCaseCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -1174,6 +1088,7 @@ int dictSdsKeyCaseCompare(void *privdata, const void *key1,
     return strcasecmp(key1, key2) == 0;
 }
 
+// dict对象释放
 void dictObjectDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
@@ -1182,6 +1097,7 @@ void dictObjectDestructor(void *privdata, void *val)
     decrRefCount(val);
 }
 
+// SDS释放
 void dictSdsDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
@@ -1189,6 +1105,7 @@ void dictSdsDestructor(void *privdata, void *val)
     sdsfree(val);
 }
 
+// dict key比较
 int dictObjKeyCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -1196,19 +1113,23 @@ int dictObjKeyCompare(void *privdata, const void *key1,
     return dictSdsKeyCompare(privdata,o1->ptr,o2->ptr);
 }
 
+// 计算dict对象的哈希值
 uint64_t dictObjHash(const void *key) {
     const robj *o = key;
     return dictGenHashFunction(o->ptr, sdslen((sds)o->ptr));
 }
 
+// 计算字典sds的哈希值
 uint64_t dictSdsHash(const void *key) {
     return dictGenHashFunction((unsigned char*)key, sdslen((char*)key));
 }
 
+// 大小写不敏感的计算字典sds的哈希值
 uint64_t dictSdsCaseHash(const void *key) {
     return dictGenCaseHashFunction((unsigned char*)key, sdslen((char*)key));
 }
 
+// 将对象解码成字符串进行比较的函数
 int dictEncObjKeyCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -1231,6 +1152,7 @@ int dictEncObjKeyCompare(void *privdata, const void *key1,
     return cmp;
 }
 
+// 计算key的哈希值
 uint64_t dictEncObjHash(const void *key) {
     robj *o = (robj*) key;
 
@@ -1425,8 +1347,7 @@ int htNeedsResize(dict *dict) {
             (used*100/size < HASHTABLE_MIN_FILL));
 }
 
-/* If the percentage of used slots in the HT reaches HASHTABLE_MIN_FILL
- * we resize the hash table to save memory */
+/* 判断是否需要调整哈希表的大小 */
 void tryResizeHashTables(int dbid) {
     if (htNeedsResize(server.db[dbid].dict))
         dictResize(server.db[dbid].dict);
@@ -1434,13 +1355,9 @@ void tryResizeHashTables(int dbid) {
         dictResize(server.db[dbid].expires);
 }
 
-/* Our hash table implementation performs rehashing incrementally while
- * we write/read from the hash table. Still if the server is idle, the hash
- * table will use two tables for a long time. So we try to use 1 millisecond
- * of CPU time at every call of this function to perform some rehahsing.
- *
- * The function returns 1 if some rehashing was performed, otherwise 0
- * is returned. */
+/* 当我们对哈希表进行写或读操作时，服务器会对数据库的字典进行rehashing操作，如果服务器一直很空闲，
+ * 那么字典就会占用两张表很长时间，所以我们尝试主动调用此函数来执行rehashing，每次使用1毫秒的时间进行rehashing
+ * 如果执行了rehash返回1，否则返回0 */
 int incrementallyRehash(int dbid) {
     /* Keys dictionary */
     if (dictIsRehashing(server.db[dbid].dict)) {
@@ -1455,53 +1372,49 @@ int incrementallyRehash(int dbid) {
     return 0;
 }
 
-/* This function is called once a background process of some kind terminates,
- * as we want to avoid resizing the hash tables when there is a child in order
- * to play well with copy-on-write (otherwise when a resize happens lots of
- * memory pages are copied). The goal of this function is to update the ability
- * for dict.c to resize the hash tables accordingly to the fact we have o not
- * running childs. */
+/* 更新热size的策略，如果有aof，rdb或者module子线程则一般不允许resize */
 void updateDictResizePolicy(void) {
+    // 没有子线程，允许resize
     if (!hasActiveChildProcess())
-        dictEnableResize();
+        dictEnableResize(); 
+    // 有子线程，不允许resize
     else
         dictDisableResize();
 }
 
-/* Return true if there are no active children processes doing RDB saving,
- * AOF rewriting, or some side process spawned by a loaded module. */
 int hasActiveChildProcess() {
     return server.rdb_child_pid != -1 ||
            server.aof_child_pid != -1 ||
            server.module_child_pid != -1;
 }
 
-/* Return true if this instance has persistence completely turned off:
- * both RDB and AOF are disabled. */
+/* 如果rdb和aof持久化都是关闭状态则返回True */
 int allPersistenceDisabled(void) {
     return server.saveparamslen == 0 && server.aof_state == AOF_OFF;
 }
 
 /* ======================= Cron: called every 100 ms ======================== */
-
-/* Add a sample to the operations per second array of samples. */
+/* 每100毫秒调用一次 */
+/* 向“每秒操作数”样品数组中添加一个样品 */
 void trackInstantaneousMetric(int metric, long long current_reading) {
+    // 计算两次采样之间的时间，单位ms
     long long t = mstime() - server.inst_metric[metric].last_sample_time;
+    // 计算两次采样之间执行的命令个数
     long long ops = current_reading -
                     server.inst_metric[metric].last_sample_count;
     long long ops_sec;
-
+    // 计算每秒执行的命令数量
     ops_sec = t > 0 ? (ops*1000/t) : 0;
-
+    // 更新采样信息
     server.inst_metric[metric].samples[server.inst_metric[metric].idx] =
         ops_sec;
     server.inst_metric[metric].idx++;
     server.inst_metric[metric].idx %= STATS_METRIC_SAMPLES;
-    server.inst_metric[metric].last_sample_time = mstime();
-    server.inst_metric[metric].last_sample_count = current_reading;
+    server.inst_metric[metric].last_sample_time = mstime(); // 设置最近一个采样的时间
+    server.inst_metric[metric].last_sample_count = current_reading; // 设置最近一次采样时执行的命令个数
 }
 
-/* Return the mean of all the samples. */
+/* 计算所有采样的平均值 */
 long long getInstantaneousMetric(int metric) {
     int j;
     long long sum = 0;
@@ -1514,26 +1427,25 @@ long long getInstantaneousMetric(int metric) {
 /* The client query buffer is an sds.c string that can end with a lot of
  * free space not used, this function reclaims space if needed.
  *
- * The function always returns 0 as it never terminates the client. */
+ * 客户端的query buffer结尾可能有很多的空间没有使用，该函数用来重新分配空间，
+ * 函数会一直返回0，因为它不会终止客户端 */
 int clientsCronResizeQueryBuffer(client *c) {
-    size_t querybuf_size = sdsAllocSize(c->querybuf);
-    time_t idletime = server.unixtime - c->lastinteraction;
+    size_t querybuf_size = sdsAllocSize(c->querybuf); // 获取输入缓冲区的大小
+    time_t idletime = server.unixtime - c->lastinteraction; // 计算idletime
 
-    /* There are two conditions to resize the query buffer:
-     * 1) Query buffer is > BIG_ARG and too big for latest peak.
-     * 2) Query buffer is > BIG_ARG and client is idle. */
+    /* 以下2中情况会resize query buffer
+     * 1) Query buffer大于32k且大约峰值的2倍
+     * 2) Query buffer大于32k且空闲时间大于2秒 */
     if (querybuf_size > PROTO_MBULK_BIG_ARG &&
          ((querybuf_size/(c->querybuf_peak+1)) > 2 ||
           idletime > 2))
     {
-        /* Only resize the query buffer if it is actually wasting
-         * at least a few kbytes. */
+        /* 只有输入缓冲区的未使用大小超过4k，则会释放未使用的空间 */
         if (sdsavail(c->querybuf) > 1024*4) {
             c->querybuf = sdsRemoveFreeSpace(c->querybuf);
         }
     }
-    /* Reset the peak again to capture the peak memory usage in the next
-     * cycle. */
+    /* 重置query buffer的使用峰值 */
     c->querybuf_peak = 0;
 
     /* Clients representing masters also use a "pending query buffer" that
@@ -1541,10 +1453,11 @@ int clientsCronResizeQueryBuffer(client *c) {
      * also needs resizing from time to time, otherwise after a very large
      * transfer (a huge value or a big MIGRATE operation) it will keep using
      * a lot of memory. */
+    // 如果客户端是master
     if (c->flags & CLIENT_MASTER) {
-        /* There are two conditions to resize the pending query buffer:
-         * 1) Pending Query buffer is > LIMIT_PENDING_QUERYBUF.
-         * 2) Used length is smaller than pending_querybuf_size/2 */
+        /* 以下2种情况需要调整pending query buffer的大小:
+         * 1) Pending Query buffer 大于4M.
+         * 2) 已使用的大小小于pending_querybuf_size的一半 */
         size_t pending_querybuf_size = sdsAllocSize(c->pending_querybuf);
         if(pending_querybuf_size > LIMIT_PENDING_QUERYBUF &&
            sdslen(c->pending_querybuf) < (pending_querybuf_size/2))
@@ -1555,10 +1468,7 @@ int clientsCronResizeQueryBuffer(client *c) {
     return 0;
 }
 
-/* This function is used in order to track clients using the biggest amount
- * of memory in the latest few seconds. This way we can provide such information
- * in the INFO output (clients section), without having to do an O(N) scan for
- * all the clients.
+/* 该函数用来追踪在过去的几秒钟使用内存最大的客户端. 我们可以从INFO的client部分获取到该信息，不需要扫描所有的客户端
  *
  * This is how it works. We have an array of CLIENTS_PEAK_MEM_USAGE_SLOTS slots
  * where we track, for each, the biggest client output and input buffers we
@@ -1598,11 +1508,8 @@ int clientsCronTrackExpansiveClients(client *c) {
     return 0; /* This function never terminates the client. */
 }
 
-/* Iterating all the clients in getMemoryOverheadData() is too slow and
- * in turn would make the INFO command too slow. So we perform this
- * computation incrementally and track the (not instantaneous but updated
- * to the second) total memory used by clients using clinetsCron() in
- * a more incremental way (depending on server.hz). */
+/* 在getMemoryOverheadData()函数中迭代所有的客户端会使INFO命令太慢. 
+ * 所以我们用clientsCron()函数以增量的方式计算客户端使用的内存（不是持续的而是秒）（取决于server.hz） */
 int clientsCronTrackClientsMemUsage(client *c) {
     size_t mem = 0;
     int type = getClientType(c);
@@ -1620,8 +1527,7 @@ int clientsCronTrackClientsMemUsage(client *c) {
     return 0;
 }
 
-/* Return the max samples in the memory usage of clients tracked by
- * the function clientsCronTrackExpansiveClients(). */
+/* 返回通过clientsCronTrackExpansiveClients()函数统计到的样本中使用内存的客户端 */
 void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
     size_t i = 0, o = 0;
     for (int j = 0; j < CLIENTS_PEAK_MEM_USAGE_SLOTS; j++) {
@@ -1646,13 +1552,12 @@ void getExpansiveClientsInfo(size_t *in_usage, size_t *out_usage) {
  * very fast: sometimes Redis has tens of hundreds of connected clients, and the
  * default server.hz value is 10, so sometimes here we need to process thousands
  * of clients per second, turning this function into a source of latency.
- */
+ * 该函数由serverCron()调用，用于在客户机上执行必须经常执行的操作。例如与超时的客户端断开连接。
+ * 该函数尽力保证所有客户端每秒都会执行到，实际上并不能严格保证 */
 #define CLIENTS_CRON_MIN_ITERATIONS 5
 void clientsCron(void) {
-    /* Try to process at least numclients/server.hz of clients
-     * per call. Since normally (if there are no big latency events) this
-     * function is called server.hz times per second, in the average case we
-     * process all the clients in 1 second. */
+    /* 每次调用最少处理numclients/server.hz个客户端，因为正常情况下，
+     * 这个函数每秒会被调用server.hz（10）次，这样可以保证每秒每个客户端都能被执行到 */
     int numclients = listLength(server.clients);
     int iterations = numclients/server.hz;
     mstime_t now = mstime();
@@ -1674,9 +1579,7 @@ void clientsCron(void) {
         listRotateTailToHead(server.clients);
         head = listFirst(server.clients);
         c = listNodeValue(head);
-        /* The following functions do different service checks on the client.
-         * The protocol is that they return non-zero if the client was
-         * terminated. */
+        /* 对客户端做不同的检测，如果客户端已经终止则返回非0 */
         if (clientsCronHandleTimeout(c,now)) continue;
         if (clientsCronResizeQueryBuffer(c)) continue;
         if (clientsCronTrackExpansiveClients(c)) continue;
@@ -1684,12 +1587,9 @@ void clientsCron(void) {
     }
 }
 
-/* This function handles 'background' operations we are required to do
- * incrementally in Redis databases, such as active key expiring, resizing,
- * rehashing. */
+/* 该函数处理后台的周期性任务，类似于key过期，resize，rehash等 */
 void databasesCron(void) {
-    /* Expire keys by random sampling. Not required for slaves
-     * as master will synthesize DELs for us. */
+    /* 通过随机采样过期key，从节点不需要，因为会主节点会同步DEL命令 */
     if (server.active_expire_enabled) {
         if (iAmMaster()) {
             activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
@@ -1698,22 +1598,18 @@ void databasesCron(void) {
         }
     }
 
-    /* Defrag keys gradually. */
+    /* 逐步整理key碎片. */
     activeDefragCycle();
 
-    /* Perform hash tables rehashing if needed, but only if there are no
-     * other processes saving the DB on disk. Otherwise rehashing is bad
-     * as will cause a lot of copy-on-write of memory pages. */
     if (!hasActiveChildProcess()) {
         /* We use global counters so if we stop the computation at a given
          * DB we'll be able to start from the successive in the next
          * cron loop iteration. */
         static unsigned int resize_db = 0;
         static unsigned int rehash_db = 0;
-        int dbs_per_call = CRON_DBS_PER_CALL;
+        int dbs_per_call = CRON_DBS_PER_CALL; // 16
         int j;
 
-        /* Don't test more DBs than we have. */
         if (dbs_per_call > server.dbnum) dbs_per_call = server.dbnum;
 
         /* Resize */
@@ -1740,16 +1636,7 @@ void databasesCron(void) {
     }
 }
 
-/* We take a cached value of the unix time in the global state because with
- * virtual memory and aging there is to store the current time in objects at
- * every object access, and accuracy is not needed. To access a global var is
- * a lot faster than calling time(NULL).
- *
- * This function should be fast because it is called at every command execution
- * in call(), so it is possible to decide if to update the daylight saving
- * info or not using the 'update_daylight_info' argument. Normally we update
- * such info only when calling this function from serverCron() but not when
- * calling it from call(). */
+/* 我们缓存一个全局的Unix时间，因为使用了虚拟内存，当访问对象时我们存储当前的时间，并且不需要准确性 */
 void updateCachedTime(int update_daylight_info) {
     server.ustime = ustime();
     server.mstime = server.ustime / 1000;
