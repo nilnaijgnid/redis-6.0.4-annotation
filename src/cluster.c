@@ -382,6 +382,7 @@ int clusterLockConfig(char *filename) {
  * 可以在运行时通过CONFIG SET命令设置。该函数对应改变myself->flags的状态集 */
 void clusterUpdateMyselfFlags(void) {
     int oldflags = myself->flags;
+    // 对应的是cluster-slave-no-failover这个参数，禁止salve failover
     int nofailover = server.cluster_slave_no_failover ?
                      CLUSTER_NODE_NOFAILOVER : 0;
     myself->flags &= ~CLUSTER_NODE_NOFAILOVER;
@@ -433,13 +434,15 @@ void clusterInit(void) {
         clusterAddNode(myself);
         saveconf = 1;
     }
+    // 如果是新创建node config,则需要保存配置
     if (saveconf) clusterSaveConfigOrDie(1);
 
-    /* 启动一个tcp端口供集群通信使用 */
     server.cfd_count = 0;
 
-    /* 限制redis端口，防止集群通信端口超出65535 */
+    
+    // 判断配置中是否开启了tls，根据配置确认对应的端口号
     int port = server.tls_cluster ? server.tls_port : server.port;
+    /* 限制redis端口，防止集群通信端口超出65535 */
     if (port > (65535-CLUSTER_PORT_INCR)) {
         serverLog(LL_WARNING, "Redis port number too high. "
                    "Cluster communication port is 10,000 port "
@@ -448,6 +451,7 @@ void clusterInit(void) {
                    "lower than 55535.");
         exit(1);
     }
+    // 启动对应的端口
     if (listenToPort(port+CLUSTER_PORT_INCR,
         server.cfd,&server.cfd_count) == C_ERR)
     {
@@ -477,7 +481,7 @@ void clusterInit(void) {
     if (server.cluster_announce_bus_port)
         myself->cport = server.cluster_announce_bus_port;
 
-    server.cluster->mf_end = 0;
+    server.cluster->mf_end = 0; // mf = Manual failove
     resetManualFailover();
     clusterUpdateMyselfFlags();
 }
@@ -599,7 +603,7 @@ void clusterAcceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     UNUSED(mask);
     UNUSED(privdata);
 
-    /* 如果节点正在启动中，则不接受任何集群连接 */
+    /* 如果节点是角色是master且正在启动中，则不接受任何集群连接 */
     if (server.masterhost == NULL && server.loading) return;
 
     while(max--) {
@@ -645,13 +649,15 @@ unsigned int keyHashSlot(char *key, int keylen) {
     for (s = 0; s < keylen; s++)
         if (key[s] == '{') break;
 
+    // 没有{}tag，则直接对整个key做crc16
     /* No '{' ? Hash the whole key. This is the base case. */
     if (s == keylen) return crc16(key,keylen) & 0x3FFF;
 
+    // 如果key中包含{,再检查是否包含}
     /* '{' found? Check if we have the corresponding '}'. */
     for (e = s+1; e < keylen; e++)
         if (key[e] == '}') break;
-
+    // 没有},或者{}直接不包含任何内容
     /* No '}' or nothing between {} ? Hash the whole key. */
     if (e == keylen || e == s+1) return crc16(key,keylen) & 0x3FFF;
 
@@ -675,7 +681,7 @@ clusterNode *createClusterNode(char *nodename, int flags) {
     if (nodename)
         memcpy(node->name, nodename, CLUSTER_NAMELEN);
     else
-        getRandomHexChars(node->name, CLUSTER_NAMELEN);
+        getRandomHexChars(node->name, CLUSTER_NAMELEN); // 40位的随机runid
     node->ctime = mstime();
     node->configEpoch = 0;
     node->flags = flags;
@@ -1045,7 +1051,7 @@ void clusterHandleConfigEpochCollision(clusterNode *sender) {
 /* -----------------------------------------------------------------------------
  * 集群节点黑名单
  *
- * 黑名单是一种保证一个指定的node id的节点在CLUSTER_BLACKLIST_TTL时间结束前被读取到的方案
+ * 黑名单是一种防止一个指定的node id的节点在CLUSTER_BLACKLIST_TTL时间结束前被读取到的方案
  *
  * 当我们想将一个节点从集群中完全移出时很有用，当 CLUSTER FORGET命令被执行，同时将node放到和名单中，
  * 即便其他节点还记得他，我们收到相应的gossip信息，也不会将该节点加回来

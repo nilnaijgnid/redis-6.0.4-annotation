@@ -2844,7 +2844,11 @@ int clientsArePaused(void) {
  * some event was processed, in order to go forward with the accept, read,
  * write, close sequence needed to serve a client.
  *
- * The function returns the total number of events processed. */
+ * The function returns the total number of events processed. 
+ * Redis 调用这个函数是为了不时处理一些事件，同时阻塞一些不可中断的操作。 
+ * 这允许在启动时或在与主服务器完全重新同步后加载数据集时回复带有 -LOADING 错误的客户端等。 
+ * 它调用事件循环来处理一些事件。 具体来说，只要我们收到对某个事件已处理的确认，我们就会尝试调用事件循环 4 次，
+ * 以便继续为客户端提供服务所需的接受、读取、写入、关闭序列。 该函数返回处理的事件总数。*/
 void processEventsWhileBlocked(void) {
     int iterations = 4; /* See the function top-comment. */
 

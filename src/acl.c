@@ -11,7 +11,14 @@ rax *Users; /* Table mapping usernames to user structures. */
 
 user *DefaultUser;  /* 全局默认用户，如果没有使用AUTH或者HELLO命令关联到一个新的用户，每个新的连接都与之关联 */
 
-list *UsersToLoad;  /* redis初始化的最后阶段，所有模块以及加载完毕后，从配置文件中加载的用户信息. 
+list *UsersToLoad;  /* This is a list of users found in the configuration file
+                     * that we'll need to load in the final stage of Redis
+                     * initialization, after all the modules are already
+                     * loaded. Every list element is a NULL terminated
+                     * array of SDS pointers: the first is the user name,
+                     * all the remaining pointers are ACL rules in the same
+                     * format as ACLSetUser().
+                     * redis初始化的最后阶段，所有模块以及加载完毕后，从配置文件中加载的用户信息. 
                      * 每个列表都是以NULL结尾的SDS指针，第一个是用户名，
                      * 所有剩下的指针与ACLSetUser()格式相同 */
 list *ACLLog;       /* 安全日志，可以使用ACL LOG命令查看 */
@@ -77,7 +84,7 @@ int time_independent_strcmp(char *a, char *b) {
     unsigned int j;
     int diff = 0;
 
-    /* 防止内存泄露 */
+    /* 防止内存泄露，限制字符串的长度 */
     if (alen > sizeof(bufa) || blen > sizeof(bufb)) return 1;
 
     memset(bufa,0,sizeof(bufa));        /* Constant time. */
@@ -97,7 +104,7 @@ int time_independent_strcmp(char *a, char *b) {
     return diff; /* 如果相同返回0 */
 }
 
-/* 提供一个SDS字符串，将SHA256十六进制表示形式作为新的SDS字符串返回. */
+/* 提供一个SDS字符串，将SHA256十六进制表示形式作为新的SDS字符串返回,作为加密后的用户密码. */
 sds ACLHashPassword(unsigned char *cleartext, size_t len) {
     SHA256_CTX ctx;
     unsigned char hash[SHA256_BLOCK_SIZE];
@@ -147,7 +154,7 @@ int ACLStringHasSpaces(const char *s, size_t len) {
     return 0;
 }
 
-/* 根据给定的类比名称，返回对应的flag，如果没有匹配的则返回0. */
+/* 根据给定的名称，返回对应的命令类别flag，如果没有匹配的则返回0. */
 uint64_t ACLGetCommandCategoryFlagByName(const char *name) {
     for (int j = 0; ACLCommandCategories[j].flag != 0; j++) {
         if (!strcasecmp(name,ACLCommandCategories[j].name)) {
@@ -197,7 +204,8 @@ user *ACLCreateUser(const char *name, size_t namelen) {
 /* This function should be called when we need an unlinked "fake" user
  * we can use in order to validate ACL rules or for other similar reasons.
  * The user will not get linked to the Users radix tree. The returned
- * user should be released with ACLFreeUser() as usually. */
+ * user should be released with ACLFreeUser() as usually. 
+ * 创建临时用户用来验证ACL规则或者其他类型的需求 */
 user *ACLCreateUnlinkedUser(void) {
     char username[64];
     for (int j = 0; ; j++) {

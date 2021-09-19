@@ -65,6 +65,7 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
     while(1) {
         ln = listFirst(server.aof_rewrite_buf_blocks);
         block = ln ? ln->value : NULL;
+        // aof_stop_sending_diff: 收到子进程发来的单个字节”!“
         if (server.aof_stop_sending_diff || !block) {
             aeDeleteFileEvent(server.el,server.aof_pipe_write_data_to_child,
                               AE_WRITABLE);
@@ -78,7 +79,7 @@ void aofChildWriteDiffData(aeEventLoop *el, int fd, void *privdata, int mask) {
             block->used -= nwritten;
             block->free += nwritten;
         }
-        // buffer数据已经写完，删除缓存列表
+        // node未使用，删除
         if (block->used == 0) listDelNode(server.aof_rewrite_buf_blocks,ln);
     }
 }
@@ -92,6 +93,7 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
     while(len) {
         /* 如果有缓冲块的话，就将数据追加进去 */
         if (block) {
+            // thislen 本次循环拷贝的长度
             unsigned long thislen = (block->free < len) ? block->free : len;
             // 如果最后一个块空间足够的话，就把数据放进去，不够的话，能放多少放多少
             if (thislen) {
@@ -113,7 +115,7 @@ void aofRewriteBufferAppend(unsigned char *s, unsigned long len) {
             // 并将其添加到列表的最后
             listAddNodeTail(server.aof_rewrite_buf_blocks,block);
 
-            /* 每创建10个块都记录到日志 */
+            /* 每创建10个块都记录到日志（notice级别），每创建100个node记录日志（warning级别） */
             numblocks = listLength(server.aof_rewrite_buf_blocks);
             if (((numblocks+1) % 10) == 0) {
                 int level = ((numblocks+1) % 100) == 0 ? LL_WARNING :
@@ -160,7 +162,7 @@ ssize_t aofRewriteBufferWrite(int fd) {
 
 /* 如果已经有一个BIO线程在AOF文件同步的话返回true */
 int aofFsyncInProgress(void) {
-    return bioPendingJobsOfType(BIO_AOF_FSYNC) != 0;
+    return bioPendingJobsOfType(BIO_AOF_FSYNC) != 0; // AOF FSYNC
 }
 
 /* 启动一个后台任务，使用另一个线程对特定的文件描述符（aof文件）执行fsync()函数 */
@@ -168,7 +170,7 @@ void aof_background_fsync(int fd) {
     bioCreateBackgroundJob(BIO_AOF_FSYNC,(void*)(long)fd,NULL,NULL);
 }
 
-/* 如果存在aofrewire子线程，将其kill掉 */
+/* 如果存在aofrewire子线程，将其kill掉，1. shutdown时，2. 修改appendonly为no时 3. 开始新的aof任务时都会调用 */
 void killAppendOnlyChild(void) {
     int statloc;
     /* 不存在aofrewrite子线程 */
@@ -204,7 +206,8 @@ void stopAppendOnly(void) {
     killAppendOnlyChild();
 }
 
-/* 当用户在运行时使用config命令将"appendonly no"修改为"appendonly yes"时调用 */
+/* 1. 当用户在运行时使用config命令将"appendonly no"修改为"appendonly yes"时调用
+ * 2. 当slave节点完成与master同步后，会尝试最多10次appendonly，如果失败的话，当前slave节点会退出 */
 int startAppendOnly(void) {
     char cwd[MAXPATHLEN]; /* 当前工作目录 */
     int newfd;
@@ -524,12 +527,14 @@ sds catAppendOnlyExpireAtCommand(sds buf, struct redisCommand *cmd, robj *key, r
     return buf;
 }
 
+// 追加命令到appendonly file
 void feedAppendOnlyFile(struct redisCommand *cmd, int dictid, robj **argv, int argc) {
     sds buf = sdsempty();
     robj *tmpargv[3];
 
     /* The DB this command was targeting is not the same as the last command
-     * we appended. To issue a SELECT command is needed. */
+     * we appended. To issue a SELECT command is needed. 
+     * 切换到对应的DB */
     if (dictid != server.aof_selected_db) {
         char seldb[64];
 
@@ -681,10 +686,12 @@ int loadAppendOnlyFile(char *filename) {
      * load the RDB file and later continue loading the AOF tail. */
     char sig[5]; /* "REDIS" */
     if (fread(sig,1,5,fp) != 5 || memcmp(sig,"REDIS",5) != 0) {
-        /* No RDB preamble, seek back at 0 offset. */
+        /* No RDB preamble, seek back at 0 offset. 
+         * 没有启动RDB preamble*/
         if (fseek(fp,0,SEEK_SET) == -1) goto readerr;
     } else {
-        /* RDB preamble. Pass loading the RDB functions. */
+        /* RDB preamble. Pass loading the RDB functions. 
+         * 启动了RDB preamble*/
         rio rdb;
 
         serverLog(LL_NOTICE,"Reading RDB preamble from AOF file...");
@@ -709,7 +716,7 @@ int loadAppendOnlyFile(char *filename) {
 
         /* Serve the clients from time to time */
         if (!(loops++ % 1000)) {
-            loadingProgress(ftello(fp));
+            loadingProgress(ftello(fp)); // 更新加载aof的进度信息和stat_peak_memory
             processEventsWhileBlocked();
             processModuleLoadingProgressEvent(1);
         }
@@ -884,7 +891,8 @@ int rioWriteBulkObject(rio *r, robj *obj) {
 }
 
 /* Emit the commands needed to rebuild a list object.
- * The function returns 0 on error, 1 on success. */
+ * The function returns 0 on error, 1 on success. 
+ * 发出重建列表对象所需的命令*/
 int rewriteListObject(rio *r, robj *key, robj *o) {
     long long count = 0, items = listTypeLength(o);
 
@@ -1282,6 +1290,7 @@ int rewriteAppendOnlyFileRio(rio *aof) {
 
             expiretime = getExpire(db,&key);
 
+            // 根据key的类型使用不同的函数
             /* Save the key and associated value */
             if (o->type == OBJ_STRING) {
                 /* Emit a SET command */
@@ -1357,7 +1366,7 @@ int rewriteAppendOnlyFile(char *filename) {
         rioSetAutoSync(&aof,REDIS_AUTOSYNC_BYTES);
 
     startSaving(RDBFLAGS_AOF_PREAMBLE);
-
+    // 判断是否启动RDB preamble,采取不同的行为
     if (server.aof_use_rdb_preamble) {
         int error;
         if (rdbSaveRio(&aof,&error,RDBFLAGS_AOF_PREAMBLE,NULL) == C_ERR) {
@@ -1378,7 +1387,9 @@ int rewriteAppendOnlyFile(char *filename) {
      * faster than it is able to send data to the child), so we try to read
      * some more data in a loop as soon as there is a good chance more data
      * will come. If it looks like we are wasting time, we abort (this
-     * happens after 20 ms without new data). */
+     * happens after 20 ms without new data). 
+     * 再读几次以从父级获取更多数据。 我们不能永远读取（服务器从客户端接收数据的速度可能比向子节点发送数据的速度要快），
+     * 因此我们尝试在循环中读取更多数据，一旦有更多数据出现的好机会 . 如果看起来我们在浪费时间，我们就会中止（这发生在 20 毫秒后没有新数据）。*/
     int nodata = 0;
     mstime_t start = mstime();
     while(mstime()-start < 1000 && nodata < 20) {

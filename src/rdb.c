@@ -1985,7 +1985,8 @@ void startLoadingFile(FILE *fp, char* filename, int rdbflags) {
     startLoading(sb.st_size, rdbflags);
 }
 
-/* Refresh the loading progress info */
+/* Refresh the loading progress info 
+ * 更新加载aof的进度信息和stat_peak_memory */
 void loadingProgress(off_t pos) {
     server.loading_loaded_bytes = pos;
     if (server.stat_peak_memory < zmalloc_used_memory())

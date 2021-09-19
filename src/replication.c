@@ -1,34 +1,3 @@
-/* Asynchronous replication implementation.
- *
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *   * Neither the name of Redis nor the names of its contributors may be used
- *     to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
-
 #include "server.h"
 #include "cluster.h"
 #include "bio.h"
@@ -55,7 +24,10 @@ int RDBGeneratedByReplication = 0;
 /* Return the pointer to a string representing the slave ip:listening_port
  * pair. Mostly useful for logging, since we want to log a slave using its
  * IP address and its listening port which is more clear for the user, for
- * example: "Closing connection with replica 10.1.2.3:6380". */
+ * example: "Closing connection with replica 10.1.2.3:6380". 
+ * 返回一个字符串指针，指向从节点的ip:listening_port。对日志记录非常有用，
+ * 因为我们想使用其IP地址和其监听端口来记录从节点，这对用户来说更为清晰。
+ * 例如："Closing connection with slave 10.1.2.3:6380" */
 char *replicationGetSlaveName(client *c) {
     static char buf[NET_PEER_ID_LEN];
     char ip[NET_IP_STR_LEN];
@@ -108,16 +80,18 @@ int bg_unlink(const char *filename) {
 }
 
 /* ---------------------------------- MASTER -------------------------------- */
-
+// 创建复制操作的积压缓冲区Backlog
 void createReplicationBacklog(void) {
     serverAssert(server.repl_backlog == NULL);
-    server.repl_backlog = zmalloc(server.repl_backlog_size);
-    server.repl_backlog_histlen = 0;
-    server.repl_backlog_idx = 0;
+    server.repl_backlog = zmalloc(server.repl_backlog_size);// 复制操作的积压缓冲区分配空间，默认为1M大小
+    server.repl_backlog_histlen = 0;// 复制积压缓冲区backlog中实际的数据长度为0
+    server.repl_backlog_idx = 0;// 复制积压缓冲区backlog当前的偏移量，下次写操作的下标为0
 
     /* We don't have any data inside our buffer, but virtually the first
      * byte we have is the next byte that will be generated for the
-     * replication stream. */
+     * replication stream. 
+     * 当新创建一个backlog时，我们将master_repl_offset加1，确保之前使用过backlog的从节点不进行错误的PSYNC操作
+     * 如果backlog既不存在数据，也没有从节点服务器连接，我们会避免增加master_repl_offset*/
     server.repl_backlog_off = server.master_repl_offset+1;
 }
 
@@ -126,7 +100,8 @@ void createReplicationBacklog(void) {
  * server.repl_backlog_size and to resize the buffer and setup it so that
  * it contains the same data as the previous one (possibly less data, but
  * the most recent bytes, or the same data and more free space in case the
- * buffer is enlarged). */
+ * buffer is enlarged). 动态调整backlog的大小。
+ * 如果backlog是被扩大时，原有的数据会被保留 */
 void resizeReplicationBacklog(long long newsize) {
     if (newsize < CONFIG_REPL_BACKLOG_MIN_SIZE)
         newsize = CONFIG_REPL_BACKLOG_MIN_SIZE;
@@ -148,6 +123,7 @@ void resizeReplicationBacklog(long long newsize) {
     }
 }
 
+// 释放复制积压缓冲区
 void freeReplicationBacklog(void) {
     serverAssert(listLength(server.slaves) == 0);
     zfree(server.repl_backlog);
@@ -1454,7 +1430,8 @@ void replicationCreateMasterClient(connection *conn, int dbid) {
 /* This function will try to re-enable the AOF file after the
  * master-replica synchronization: if it fails after multiple attempts
  * the replica cannot be considered reliable and exists with an
- * error. */
+ * error. 
+ * 当slave节点完成与master同步后，会尝试最多10次appendonly，如果失败的话，当前slave节点会退出*/
 void restartAOFAfterSYNC() {
     unsigned int tries, max_tries = 10;
     for (tries = 0; tries < max_tries; ++tries) {

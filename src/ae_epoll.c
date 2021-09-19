@@ -45,7 +45,7 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
         zfree(state);
         return -1;
     }
-    state->epfd = epoll_create(1024); /* 1024 is just a hint for the kernel */
+    state->epfd = epoll_create(1024); /* 1024 is just a hint for the kernel 从Linux 2.6.8开始，max_size参数将被忽略，但必须大于零 */ 
     if (state->epfd == -1) {
         zfree(state->events);
         zfree(state);
